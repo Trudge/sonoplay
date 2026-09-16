@@ -52,6 +52,7 @@ secrets/
 
 # ── Runtime data (mounted as volumes) ──
 config/
+sonoplay-config/
 data/
 temp/
 
