@@ -101,6 +101,28 @@ assert updated.status_code == 200
 assert updated.json()["session_ttl_hours"] == 12
 assert "session_secret" not in updated.json()
 assert plexserver.settings.datastore.get_auth_settings()["session_ttl_hours"] == 12
+
+# Enabling is two-step: pending until a successful Plex login completes it.
+disabled = client.post("/api/auth-settings", headers=session_header, json={"enabled": False})
+assert disabled.status_code == 200
+assert disabled.json()["enabled"] is False
+pending = client.post(
+    "/api/auth-settings",
+    headers=session_header,
+    json={"enabled": True, "allowed_users": "1,owner"},
+)
+assert pending.status_code == 200
+assert pending.json()["enabled"] is False
+assert pending.json()["pending_enable"] is True
+auth.complete_pending_enable()
+assert plexserver.settings.auth_enabled is True
+assert plexserver.settings.auth_pending_enable is False
+
+# Emergency recovery token issues an admin session.
+recovery = client.get("/api/plex-status?recovery=test-recovery", follow_redirects=False)
+assert recovery.status_code == 303
+recovery_cookie = recovery.headers["set-cookie"].split(";", 1)[0]
+assert client.get("/api/plex-status", headers={"Cookie": recovery_cookie}).status_code == 200
 """
 
 
@@ -111,6 +133,7 @@ def test_plex_auth_prototype(tmp_path):
     env["AUTH_SESSION_SECRET"] = "test-session-secret"
     env["AUTH_ALLOWED_USERS"] = "1,owner"
     env["AUTH_COOKIE_SECURE"] = "false"
+    env["AUTH_RECOVERY_TOKEN"] = "test-recovery"
 
     result = subprocess.run(
         [sys.executable, "-c", _SCRIPT],

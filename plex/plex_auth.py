@@ -69,12 +69,13 @@ def _b64decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + padding)
 
 
-def issue_session(user: dict) -> str:
+def issue_session(user: dict, *, recovery: bool = False) -> str:
     """Create a signed session value containing only non-secret identity data."""
     now = int(time.time())
     payload = {
-        "sub": str(user.get("id") or user.get("uuid") or ""),
-        "name": str(user.get("username") or user.get("title") or ""),
+        "sub": "recovery" if recovery else str(user.get("id") or user.get("uuid") or ""),
+        "name": "Recovery" if recovery else str(user.get("username") or user.get("title") or ""),
+        "recovery": True if recovery else False,
         "iat": now,
         "exp": now + int(settings.auth_session_ttl_hours * 3600),
     }
@@ -282,6 +283,13 @@ def rate_limit(request: Request, bucket: str, limit: int | None = None) -> bool:
     return True
 
 
+def complete_pending_enable() -> None:
+    """Enable auth only after a successful, allowed Plex login."""
+    settings.datastore.set_auth_settings({"enabled": True, "pending_enable": False})
+    object.__setattr__(settings, "auth_enabled", True)
+    object.__setattr__(settings, "auth_pending_enable", False)
+
+
 def _same_origin(request: Request) -> bool:
     """Reject browser cross-site state changes when using cookie auth."""
     origin = request.headers.get("origin")
@@ -315,6 +323,24 @@ async def auth_middleware(request: Request, call_next):
     if path in _DOC_PATHS:
         return JSONResponse({"detail": "Not Found"}, status_code=404)
 
+    recovery_token = settings.auth_recovery_token
+    if recovery_token and request.query_params.get("recovery") == recovery_token:
+        cookie_value = issue_session({}, recovery=True)
+        if request.method in ("GET", "HEAD"):
+            response = RedirectResponse(request.url.path, status_code=303)
+        else:
+            response = await call_next(request)
+        response.set_cookie(
+            SESSION_COOKIE,
+            cookie_value,
+            max_age=int(settings.auth_session_ttl_hours * 3600),
+            httponly=True,
+            secure=settings.auth_cookie_secure,
+            samesite="strict",
+            path="/",
+        )
+        return response
+
     token = request.headers.get("X-Plex-Token") or request.query_params.get("token")
     if token:
         user = await validate_plex_token(token)
@@ -324,7 +350,7 @@ async def auth_middleware(request: Request, call_next):
             return await call_next(request)
 
     session = verify_session(request.cookies.get(SESSION_COOKIE))
-    if session is not None and is_user_allowed(session):
+    if session is not None and (session.get("recovery") or is_user_allowed(session)):
         if request.method not in ("GET", "HEAD", "OPTIONS") and not _same_origin(request):
             return JSONResponse({"detail": "Cross-site request rejected"}, status_code=403)
         request.state.auth_method = "session"

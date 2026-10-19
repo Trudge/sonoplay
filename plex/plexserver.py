@@ -302,6 +302,7 @@ def _apply_stored_auth_settings():
         "cookie_secure": "auth_cookie_secure",
         "session_ttl_hours": "auth_session_ttl_hours",
         "session_secret": "auth_session_secret",
+        "pending_enable": "auth_pending_enable",
     }
     for key, attr in mapping.items():
         if key in stored:
@@ -316,6 +317,8 @@ def _auth_settings_payload() -> dict:
         "cookie_secure": bool(settings.auth_cookie_secure),
         "session_ttl_hours": int(settings.auth_session_ttl_hours),
         "session_secret_configured": bool(settings.auth_session_secret),
+        "pending_enable": bool(settings.auth_pending_enable),
+        "recovery_configured": bool(settings.auth_recovery_token),
     }
 
 
@@ -388,7 +391,7 @@ async def auth_login(request: Request):
     """Start the Plex PIN login flow for the local UI."""
     if not plex_auth.rate_limit(request, "login", limit=max(5, settings.auth_rate_limit_per_minute // 3)):
         return JSONResponse({"detail": "Too many login attempts"}, status_code=429)
-    if not settings.auth_enabled:
+    if not settings.auth_enabled and not settings.auth_pending_enable:
         return RedirectResponse("/", status_code=303)
 
     session = plex_auth.verify_session(request.cookies.get(plex_auth.SESSION_COOKIE))
@@ -418,7 +421,7 @@ async def auth_login(request: Request):
 @s.get("/auth/check")
 async def auth_check(request: Request, pin_id: str):
     """Poll a Plex PIN and create a session once the user approves it."""
-    if not settings.auth_enabled:
+    if not settings.auth_enabled and not settings.auth_pending_enable:
         return JSONResponse({"status": "disabled"}, status_code=404)
     if not plex_auth.rate_limit(request, "check"):
         return JSONResponse({"status": "rate_limited"}, status_code=429)
@@ -440,6 +443,10 @@ async def auth_check(request: Request, pin_id: str):
     if not plex_auth.is_user_allowed(user):
         logger.warning("Rejected Plex login for disallowed user %s", user.get("id"))
         return JSONResponse({"status": "forbidden"}, status_code=403)
+
+    if settings.auth_pending_enable:
+        plex_auth.complete_pending_enable()
+        logger.info("Plex authentication enabled after successful login")
 
     response = JSONResponse(
         {"status": "ok", "user": user.get("username") or user.get("title") or user.get("id")},
@@ -655,13 +662,25 @@ async def api_update_auth_settings(payload: AuthSettingsUpdate):
     effective = _auth_settings_payload()
     effective.update(updates)
 
-    if effective["enabled"] and not effective["allow_any_user"] and not str(effective["allowed_users"]).strip():
+    if updates.get("enabled") is True and not settings.auth_enabled:
+        # Do not enforce auth until the operator has completed a Plex login.
+        updates["enabled"] = False
+        updates["pending_enable"] = True
+        effective["enabled"] = False
+        effective["pending_enable"] = True
+    elif updates.get("enabled") is False:
+        updates["pending_enable"] = False
+        effective["enabled"] = False
+        effective["pending_enable"] = False
+
+    want_enabled = bool(effective["enabled"] or effective.get("pending_enable"))
+    if want_enabled and not effective["allow_any_user"] and not str(effective["allowed_users"]).strip():
         raise HTTPException(
             400,
             "Set at least one allowed Plex user, or explicitly allow any Plex user.",
         )
 
-    if effective["enabled"] and not effective["session_secret_configured"]:
+    if want_enabled and not effective["session_secret_configured"]:
         import secrets
         updates["session_secret"] = secrets.token_urlsafe(32)
 
@@ -674,6 +693,7 @@ async def api_update_auth_settings(payload: AuthSettingsUpdate):
             "cookie_secure": "auth_cookie_secure",
             "session_ttl_hours": "auth_session_ttl_hours",
             "session_secret": "auth_session_secret",
+            "pending_enable": "auth_pending_enable",
         }
         for key, attr in mapping.items():
             if key in updates:

@@ -93,6 +93,11 @@ Notes:
 - The prototype keeps `/health` public and requires no auth when `AUTH_ENABLED` is false.
 - Once auth has been saved from the Settings dialog, the persisted values take
   precedence over the environment defaults.
+- Enabling auth from the UI is two-step: the setting is stored as pending and
+  only activated after a successful Plex login, so a wrong allowlist cannot lock
+  you out.
+- Emergency bypass: set `AUTH_RECOVERY_TOKEN` and open
+  `http://<host>:32488/?recovery=<token>` to receive an admin session.
 
 ## Requirements
 

@@ -5,7 +5,7 @@ import re
 
 # Matches query-string and mapping-style secrets, e.g.:
 #   X-Plex-Token=abc, token=abc, 'X-Plex-Token': 'abc', authToken=abc
-_SECRET_KEY = r"(?:(?:x-plex-)?token|authtoken|auth_token|pin|password|secret|api[_-]?key)"
+_SECRET_KEY = r"(?:(?:x-plex-)?token|authtoken|auth_token|recovery|pin|password|secret|api[_-]?key)"
 _SECRET_RE = re.compile(
     rf"(?i)({_SECRET_KEY}['\"]?\s*[:=]\s*['\"]?)[^&\s,'\"}}]+"
 )

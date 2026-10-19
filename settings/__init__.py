@@ -129,6 +129,8 @@ class Settings(BaseSettings):
     auth_cookie_secure: bool = False    # Set true when served over HTTPS
     auth_client_identifier: str = "sonoplay-web"
     auth_allow_any_user: bool = False
+    auth_pending_enable: bool = False
+    auth_recovery_token: str | None = None
     auth_rate_limit_per_minute: int = 30
     trusted_hosts: str = ""            # Comma-separated Host allowlist
     allow_loopback_subscribers: bool = False

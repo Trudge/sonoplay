@@ -405,6 +405,10 @@
                     document.getElementById('authSecretStatus').textContent = auth.session_secret_configured
                         ? 'Session secret is configured.'
                         : 'A random session secret will be generated when auth is enabled.';
+                    if (auth.pending_enable) {
+                        document.getElementById('authSecretStatus').textContent =
+                            'Pending: sign in with Plex to activate authentication.';
+                    }
                 }
             } catch (error) {
                 console.error('Failed to load settings:', error);
@@ -457,11 +461,11 @@
 
                 closeSettingsModal();
 
-                if (auth.enabled && !authWasEnabled) {
+                if ((auth.enabled || auth.pending_enable) && !authWasEnabled) {
                     await Swal.fire({
-                        icon: 'success',
-                        title: 'Authentication Enabled',
-                        text: 'Sign in with Plex to continue.',
+                        icon: 'info',
+                        title: 'Confirm Plex Sign-In',
+                        text: 'Authentication will be enabled after your Plex login succeeds.',
                         confirmButtonText: 'Sign in'
                     });
                     window.location.href = '/auth/login';

@@ -290,6 +290,7 @@ class JSONDataStore(DataStore):
         allowed = {
             "enabled", "allowed_users", "allow_any_user",
             "cookie_secure", "session_ttl_hours", "session_secret",
+            "pending_enable",
         }
 
         def mutator(meta: Dict[str, Any]) -> None:
