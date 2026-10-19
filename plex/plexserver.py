@@ -960,9 +960,7 @@ async def link_device(request: Request,
 @s.api_route("/dlna/callback/{uuid}", methods=["NOTIFY"])
 async def dlna_subscribe(request: Request, uuid: str):
     require_valid_uuid(uuid)
-    if settings.auth_enabled and not plex_auth.verify_callback_token(
-        uuid, request.query_params.get("token")
-    ):
+    if not plex_auth.verify_callback_token(uuid, request.query_params.get("token")):
         raise HTTPException(403, "Invalid callback token")
     adapter = await adapter_by_device(await get_device_by_uuid(uuid))
     body = bytearray()

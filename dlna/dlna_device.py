@@ -32,7 +32,6 @@ from html import escape as xml_escape
 import aiohttp
 from aiohttp import ClientConnectorError, ClientConnectionError
 
-from plex.adapters import remove_adapter
 from utils import xml2dict, UPNP_RC_SERVICE_TYPE, UPNP_AVT_SERVICE_TYPE, g, extract_value
 from dlna.discover import guess_local_ip, is_safe_dlna_url
 from settings import settings
@@ -311,7 +310,6 @@ class DlnaDeviceService(object):
                         return None
                     return info.Envelope.Body.get(f"{action}Response")
             except (ClientConnectionError, asyncio.TimeoutError) as e:
-                last_exception = e
                 if attempt < max_attempts:
                     logger.debug("dlna %s %s %s (attempt %d/%d), retrying: %s",
                                 self.device.name, action,
@@ -360,10 +358,9 @@ class DlnaDeviceService(object):
         if self.next_subscribe_call_time is not None:
             if datetime.now(timezone.utc) < self.next_subscribe_call_time:
                 return
+        from plex import plex_auth
         callback_url = 'http://' + settings.host_ip + ':' + str(settings.http_port) + '/dlna/callback/' + self.device.uuid
-        if settings.auth_enabled:
-            from plex import plex_auth
-            callback_url += '?token=' + plex_auth.callback_token(self.device.uuid)
+        callback_url += '?token=' + plex_auth.callback_token(self.device.uuid)
         headers = {
             'Cache-Control': 'no-cache',
             'User-Agent': 'SonoPlay/1.0',

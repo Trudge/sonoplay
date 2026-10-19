@@ -282,6 +282,10 @@ class DlnaState(object):
         # returning (which was causing close() to be called on None, leaking
         # all of the uvloop libuv FDs: epoll, eventfd, and pipe pairs).
         loop = asyncio.new_event_loop()
+        # Initialize before publishing running_loop so update() can never
+        # observe a live loop with a None lock/event.
+        self.change_session_lock = asyncio.Lock()
+        self.looping_wait_event = asyncio.Event()
         self.running_loop = loop
         asyncio.set_event_loop(loop)
         try:
