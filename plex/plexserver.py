@@ -103,6 +103,14 @@ class AudioSettingsUpdate(BaseModel):
     sample_rate_hz: Optional[int] = Field(default=None, ge=0, le=384000)
 
 
+class AuthSettingsUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    allowed_users: Optional[str] = None
+    allow_any_user: Optional[bool] = None
+    cookie_secure: Optional[bool] = None
+    session_ttl_hours: Optional[int] = Field(default=None, ge=1, le=720)
+
+
 plex_server = FastAPI(
     docs_url=None if settings.auth_enabled else "/docs",
     redoc_url=None if settings.auth_enabled else "/redoc",
@@ -284,9 +292,37 @@ def _apply_stored_audio_settings():
                 stored.get("bitrate_kbps"), stored.get("sample_rate_hz"))
 
 
+def _apply_stored_auth_settings():
+    """Apply UI-managed auth settings over the environment defaults."""
+    stored = settings.datastore.get_auth_settings()
+    mapping = {
+        "enabled": "auth_enabled",
+        "allowed_users": "auth_allowed_users",
+        "allow_any_user": "auth_allow_any_user",
+        "cookie_secure": "auth_cookie_secure",
+        "session_ttl_hours": "auth_session_ttl_hours",
+        "session_secret": "auth_session_secret",
+    }
+    for key, attr in mapping.items():
+        if key in stored:
+            object.__setattr__(settings, attr, stored[key])
+
+
+def _auth_settings_payload() -> dict:
+    return {
+        "enabled": bool(settings.auth_enabled),
+        "allowed_users": settings.auth_allowed_users,
+        "allow_any_user": bool(settings.auth_allow_any_user),
+        "cookie_secure": bool(settings.auth_cookie_secure),
+        "session_ttl_hours": int(settings.auth_session_ttl_hours),
+        "session_secret_configured": bool(settings.auth_session_secret),
+    }
+
+
 @s.on_event("startup")
 async def on_startup():
     _apply_stored_audio_settings()
+    _apply_stored_auth_settings()
     # Create HTTP session with default timeout
     timeout = aiohttp.ClientTimeout(
         total=settings.http_timeout_default,
@@ -607,6 +643,44 @@ async def api_update_onboarding_state(payload: OnboardingStateUpdate):
 
 
 # ===================== Audio Settings API =====================
+
+@s.get("/api/auth-settings")
+async def api_get_auth_settings():
+    return _auth_settings_payload()
+
+
+@s.post("/api/auth-settings")
+async def api_update_auth_settings(payload: AuthSettingsUpdate):
+    updates = payload.model_dump(exclude_none=True)
+    effective = _auth_settings_payload()
+    effective.update(updates)
+
+    if effective["enabled"] and not effective["allow_any_user"] and not str(effective["allowed_users"]).strip():
+        raise HTTPException(
+            400,
+            "Set at least one allowed Plex user, or explicitly allow any Plex user.",
+        )
+
+    if effective["enabled"] and not effective["session_secret_configured"]:
+        import secrets
+        updates["session_secret"] = secrets.token_urlsafe(32)
+
+    if updates:
+        settings.datastore.set_auth_settings(updates)
+        mapping = {
+            "enabled": "auth_enabled",
+            "allowed_users": "auth_allowed_users",
+            "allow_any_user": "auth_allow_any_user",
+            "cookie_secure": "auth_cookie_secure",
+            "session_ttl_hours": "auth_session_ttl_hours",
+            "session_secret": "auth_session_secret",
+        }
+        for key, attr in mapping.items():
+            if key in updates:
+                object.__setattr__(settings, attr, updates[key])
+
+    return _auth_settings_payload()
+
 
 @s.get("/api/audio-settings")
 async def api_get_audio_settings():

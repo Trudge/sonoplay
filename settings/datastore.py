@@ -95,6 +95,16 @@ class DataStore(ABC):
         """Persist audio transcoding settings."""
         pass
 
+    @abstractmethod
+    def get_auth_settings(self) -> Dict[str, Any]:
+        """Get persisted Plex-auth settings."""
+        pass
+
+    @abstractmethod
+    def set_auth_settings(self, values: Dict[str, Any]) -> None:
+        """Persist Plex-auth settings."""
+        pass
+
 
 # Default audio settings - safe values for most DLNA speakers
 DEFAULT_AUDIO_SETTINGS = {
@@ -265,5 +275,28 @@ class JSONDataStore(DataStore):
             if sample_rate_hz is not None:
                 audio["sample_rate_hz"] = int(sample_rate_hz) if sample_rate_hz > 0 else None
             meta["audio_settings"] = audio
+
+        self._mutate_meta(mutator)
+
+    def get_auth_settings(self) -> Dict[str, Any]:
+        """Return persisted auth settings without defaults (empty if unset)."""
+        data = self._load_data()
+        meta = dict(data.get(self._META_KEY, {}))
+        stored = meta.get("auth_settings", {})
+        return deepcopy(stored) if isinstance(stored, dict) else {}
+
+    def set_auth_settings(self, values: Dict[str, Any]) -> None:
+        """Persist auth settings, leaving unspecified keys unchanged."""
+        allowed = {
+            "enabled", "allowed_users", "allow_any_user",
+            "cookie_secure", "session_ttl_hours", "session_secret",
+        }
+
+        def mutator(meta: Dict[str, Any]) -> None:
+            auth = dict(meta.get("auth_settings", {}))
+            for key, value in values.items():
+                if key in allowed:
+                    auth[key] = value
+            meta["auth_settings"] = auth
 
         self._mutate_meta(mutator)

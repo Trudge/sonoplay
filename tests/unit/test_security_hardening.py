@@ -90,7 +90,8 @@ for xml in (
 # Stream proxy tokens are signed, expiring, and tamper-evident.
 token = plex_auth.stream_token("device-1", "/library/parts/1/file.flac")
 assert plex_auth.verify_stream_token(token) == ("device-1", "/library/parts/1/file.flac")
-assert plex_auth.verify_stream_token(token[:-1] + ("A" if token[-1] != "A" else "B")) is None
+body, signature = token.split(".", 1)
+assert plex_auth.verify_stream_token(body[:-1] + ("A" if body[-1] != "A" else "B") + "." + signature) is None
 assert plex_auth.verify_stream_token(plex_auth.stream_token("device-1", "http://evil")) is None
 
 # Auth fails closed for an empty allowlist unless explicitly opened.
@@ -117,6 +118,14 @@ assert client.get("/stream/not-a-token").status_code == 403
 health = client.get("/health")
 assert health.headers.get("X-Content-Type-Options") == "nosniff"
 assert "default-src 'self'" in health.headers.get("Content-Security-Policy", "")
+auth_settings = client.get("/api/auth-settings")
+assert auth_settings.status_code == 200
+assert auth_settings.json()["enabled"] is False
+lockout = client.post(
+    "/api/auth-settings",
+    json={"enabled": True, "allowed_users": "", "allow_any_user": False},
+)
+assert lockout.status_code == 400
 
 # Config files are owner-only and written atomically.
 path = Path(os.environ["CONFIG_PATH"]) / "secrets.json"

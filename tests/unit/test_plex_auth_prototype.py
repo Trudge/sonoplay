@@ -17,7 +17,8 @@ from redaction import RedactSecretsFilter, RedactingFormatter, redact_secrets
 user = {"id": "1", "username": "tester"}
 session = auth.issue_session(user)
 assert auth.verify_session(session)["sub"] == "1"
-assert auth.verify_session(session[:-1] + ("A" if session[-1] != "A" else "B")) is None
+body, signature = session.split(".", 1)
+assert auth.verify_session(body[:-1] + ("A" if body[-1] != "A" else "B") + "." + signature) is None
 
 # Allowlist matching accepts id/username and rejects others.
 auth.settings.auth_allowed_users = "1,owner"
@@ -77,6 +78,29 @@ same_origin = client.post(
     headers={**session_header, "Origin": "http://testserver"},
 )
 assert same_origin.status_code == 200
+
+# Auth settings can be read and updated by an authenticated session.
+settings_response = client.get("/api/auth-settings", headers=session_header)
+assert settings_response.status_code == 200
+assert settings_response.json()["enabled"] is True
+assert settings_response.json()["allowed_users"] == "1,owner"
+
+lockout = client.post(
+    "/api/auth-settings",
+    headers=session_header,
+    json={"enabled": True, "allowed_users": "", "allow_any_user": False},
+)
+assert lockout.status_code == 400
+
+updated = client.post(
+    "/api/auth-settings",
+    headers=session_header,
+    json={"session_ttl_hours": 12, "cookie_secure": False},
+)
+assert updated.status_code == 200
+assert updated.json()["session_ttl_hours"] == 12
+assert "session_secret" not in updated.json()
+assert plexserver.settings.datastore.get_auth_settings()["session_ttl_hours"] == 12
 """
 
 

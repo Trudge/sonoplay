@@ -91,6 +91,8 @@ Notes:
 - `AUTH_ALLOWED_USERS` is required; logins fail closed when it is empty. Set `AUTH_ALLOW_ANY_USER=true` only if you really want open signup.
 - Set `AUTH_SESSION_SECRET` explicitly, otherwise sessions are invalidated on restart.
 - The prototype keeps `/health` public and requires no auth when `AUTH_ENABLED` is false.
+- Once auth has been saved from the Settings dialog, the persisted values take
+  precedence over the environment defaults.
 
 ## Requirements
 

@@ -59,7 +59,7 @@
                     {% endif %}
 
                     <!-- Settings Button -->
-                    <button class="nav-settings-btn" onclick="openSettingsModal()" title="Audio Settings" style="background: none; border: none; cursor: pointer; padding: 0.5rem; color: var(--text-secondary); font-size: 1.1rem; transition: color 0.2s;">
+                    <button class="nav-settings-btn" onclick="openSettingsModal()" title="Settings" style="background: none; border: none; cursor: pointer; padding: 0.5rem; color: var(--text-secondary); font-size: 1.1rem; transition: color 0.2s;">
                         <i class="fas fa-cog"></i>
                     </button>
                     
@@ -74,9 +74,9 @@
         
         <!-- Audio Settings Modal -->
         <div id="settingsModal" class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; justify-content: center; align-items: center;">
-            <div class="settings-modal-content" style="background: var(--bg-primary); border-radius: 12px; padding: 2rem; max-width: 450px; width: 90%; box-shadow: 0 20px 60px rgba(0,0,0,0.3);">
+            <div class="settings-modal-content" style="background: var(--bg-primary); border-radius: 12px; padding: 2rem; max-width: 450px; width: 90%; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.3);">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
-                    <h2 id="settingsModalTitle" style="margin: 0; font-size: 1.25rem; font-weight: 600;">Audio Settings</h2>
+                    <h2 id="settingsModalTitle" style="margin: 0; font-size: 1.25rem; font-weight: 600;">Settings</h2>
                     <button onclick="closeSettingsModal()" aria-label="Close settings" style="background: none; border: none; cursor: pointer; font-size: 1.5rem; color: var(--text-secondary); line-height: 1;">&times;</button>
                 </div>
                 
@@ -114,8 +114,54 @@
                     </div>
                 </div>
                 
+                <hr style="border: none; border-top: 1px solid var(--border); margin: 0 0 1.5rem;">
+
+                <h3 style="margin: 0 0 0.5rem; font-size: 1rem;">Plex Authentication</h3>
+                <p style="color: var(--text-secondary); font-size: 0.8rem; margin-bottom: 1rem;">
+                    Require a Plex sign-in for the web UI and API. Plexamp playback uses its Plex token.
+                </p>
+
+                <label style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem; font-weight: 500;">
+                    <input type="checkbox" id="authEnabled">
+                    <span>Require Plex sign-in</span>
+                </label>
+
+                <div style="margin-bottom: 1rem;">
+                    <label for="authAllowedUsers" style="display: block; margin-bottom: 0.35rem; font-weight: 500;">
+                        Allowed Plex users
+                    </label>
+                    <input type="text" id="authAllowedUsers" autocomplete="off"
+                           placeholder="Plex user IDs or usernames, comma-separated"
+                           style="width: 100%; padding: 0.55rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-secondary); color: var(--text-primary);">
+                    <div style="font-size: 0.75rem; color: var(--text-tertiary); margin-top: 0.25rem;">
+                        Use the Plex account ID or username. Required unless open signup is enabled.
+                    </div>
+                </div>
+
+                <label style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem;">
+                    <input type="checkbox" id="authAllowAny">
+                    <span>Allow any Plex account <span style="color: var(--text-tertiary); font-weight: 400;">(not recommended)</span></span>
+                </label>
+
+                <div style="margin-bottom: 0.75rem;">
+                    <label for="authSessionTtl" style="display: flex; justify-content: space-between; margin-bottom: 0.35rem; font-weight: 500;">
+                        <span>Session lifetime</span>
+                        <span id="authSessionTtlValue" style="color: var(--text-secondary);">24 hours</span>
+                    </label>
+                    <input type="range" id="authSessionTtl" min="1" max="168" value="24"
+                           style="width: 100%; cursor: pointer;"
+                           oninput="document.getElementById('authSessionTtlValue').textContent = this.value + ' hours'">
+                </div>
+
+                <label style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
+                    <input type="checkbox" id="authCookieSecure">
+                    <span>Secure cookie <span style="color: var(--text-tertiary); font-weight: 400;">(HTTPS only)</span></span>
+                </label>
+
+                <p id="authSecretStatus" style="font-size: 0.75rem; color: var(--text-tertiary); margin-bottom: 1.5rem;"></p>
+
                 <!-- Save Button -->
-                <button id="saveSettingsBtn" onclick="saveAudioSettings()" 
+                <button id="saveSettingsBtn" onclick="saveSettings()"
                         style="width: 100%; padding: 0.75rem; background: var(--accent); color: white; border: none; border-radius: 8px; font-weight: 500; cursor: pointer; font-size: 1rem;">
                     Save Settings
                 </button>
@@ -317,6 +363,7 @@
         }
         
         let settingsModalPrevFocus = null;
+        let authWasEnabled = false;
 
         async function openSettingsModal() {
             const modal = document.getElementById('settingsModal');
@@ -328,22 +375,39 @@
 
             // Fetch current settings
             try {
-                const response = await fetch('/api/audio-settings');
-                if (response.ok) {
-                    const data = await response.json();
-                    
+                const [audioResponse, authResponse] = await Promise.all([
+                    fetch('/api/audio-settings'),
+                    fetch('/api/auth-settings')
+                ]);
+                if (audioResponse.ok) {
+                    const data = await audioResponse.json();
+
                     // Set slider positions
                     const bitrateIdx = findSliderIndex(data.bitrate_kbps, bitrateStops);
                     const sampleRateIdx = findSliderIndex(data.sample_rate_hz, sampleRateStops);
-                    
+
                     document.getElementById('bitrateSlider').value = bitrateIdx;
                     document.getElementById('sampleRateSlider').value = sampleRateIdx;
-                    
+
                     updateBitrateLabel(bitrateIdx);
                     updateSampleRateLabel(sampleRateIdx);
                 }
+                if (authResponse.ok) {
+                    const auth = await authResponse.json();
+                    authWasEnabled = !!auth.enabled;
+                    document.getElementById('authEnabled').checked = authWasEnabled;
+                    document.getElementById('authAllowedUsers').value = auth.allowed_users || '';
+                    document.getElementById('authAllowAny').checked = !!auth.allow_any_user;
+                    document.getElementById('authCookieSecure').checked = !!auth.cookie_secure;
+                    const ttl = Math.min(168, Math.max(1, auth.session_ttl_hours || 24));
+                    document.getElementById('authSessionTtl').value = ttl;
+                    document.getElementById('authSessionTtlValue').textContent = ttl + ' hours';
+                    document.getElementById('authSecretStatus').textContent = auth.session_secret_configured
+                        ? 'Session secret is configured.'
+                        : 'A random session secret will be generated when auth is enabled.';
+                }
             } catch (error) {
-                console.error('Failed to load audio settings:', error);
+                console.error('Failed to load settings:', error);
             }
         }
         
@@ -355,15 +419,15 @@
             settingsModalPrevFocus = null;
         }
         
-        async function saveAudioSettings() {
+        async function saveSettings() {
             const bitrateIdx = document.getElementById('bitrateSlider').value;
             const sampleRateIdx = document.getElementById('sampleRateSlider').value;
-            
+
             const bitrate = bitrateStops[bitrateIdx];
             const sampleRate = sampleRateStops[sampleRateIdx];
-            
+
             try {
-                const response = await fetch('/api/audio-settings', {
+                const audioResponse = await fetch('/api/audio-settings', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -371,29 +435,56 @@
                         sample_rate_hz: sampleRate || null
                     })
                 });
-                
-                if (response.ok) {
-                    closeSettingsModal();
-                    Swal.fire({
-                        icon: 'success',
-                        title: 'Settings Saved',
-                        text: 'Audio transcoding thresholds updated.',
-                        timer: 2000,
-                        showConfirmButton: false
-                    });
-                } else {
-                    throw new Error('Failed to save');
+                if (!audioResponse.ok) throw new Error('Failed to save audio settings');
+
+                const ttl = parseInt(document.getElementById('authSessionTtl').value, 10) || 24;
+                const authResponse = await fetch('/api/auth-settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        enabled: document.getElementById('authEnabled').checked,
+                        allowed_users: document.getElementById('authAllowedUsers').value.trim(),
+                        allow_any_user: document.getElementById('authAllowAny').checked,
+                        cookie_secure: document.getElementById('authCookieSecure').checked,
+                        session_ttl_hours: ttl
+                    })
+                });
+                if (!authResponse.ok) {
+                    const error = await authResponse.json().catch(() => ({}));
+                    throw new Error(error.detail || 'Failed to save authentication settings');
                 }
+                const auth = await authResponse.json();
+
+                closeSettingsModal();
+
+                if (auth.enabled && !authWasEnabled) {
+                    await Swal.fire({
+                        icon: 'success',
+                        title: 'Authentication Enabled',
+                        text: 'Sign in with Plex to continue.',
+                        confirmButtonText: 'Sign in'
+                    });
+                    window.location.href = '/auth/login';
+                    return;
+                }
+
+                Swal.fire({
+                    icon: 'success',
+                    title: 'Settings Saved',
+                    text: 'Audio and authentication settings updated.',
+                    timer: 2000,
+                    showConfirmButton: false
+                });
             } catch (error) {
-                console.error('Failed to save audio settings:', error);
+                console.error('Failed to save settings:', error);
                 Swal.fire({
                     icon: 'error',
                     title: 'Save Failed',
-                    text: 'Could not save audio settings. Please try again.'
+                    text: error.message || 'Could not save settings. Please try again.'
                 });
             }
         }
-        
+
         // Close modal on backdrop click
         document.getElementById('settingsModal')?.addEventListener('click', function(e) {
             if (e.target === this) closeSettingsModal();
