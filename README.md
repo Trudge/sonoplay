@@ -3,7 +3,7 @@
 Bridge Plexamp to DLNA/UPnP renderers on your local network.
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.14](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org/downloads/)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED.svg)](https://www.docker.com/)
 
 ## What It Does
@@ -65,6 +65,8 @@ Common settings:
 - HTTP_PORT: Web UI/API port (default 32488)
 - HOST_IP: Explicit host IP (auto-detected when unset)
 - CLIENT_PROFILE: Plex transcoding profile
+- PMS_ADDRESS / PMS_PORT: optional fixed PMS location
+- TRUSTED_HOSTS: optional comma-separated Host allowlist
 
 Note: docker-compose.yaml uses env_file.required and needs Docker Compose v2.17+.
 
@@ -86,7 +88,7 @@ authenticate with `X-Plex-Token` or `token` query parameters.
 
 Notes:
 
-- If `AUTH_ALLOWED_USERS` is empty, any Plex account can sign in.
+- `AUTH_ALLOWED_USERS` is required; logins fail closed when it is empty. Set `AUTH_ALLOW_ANY_USER=true` only if you really want open signup.
 - Set `AUTH_SESSION_SECRET` explicitly, otherwise sessions are invalidated on restart.
 - The prototype keeps `/health` public and requires no auth when `AUTH_ENABLED` is false.
 

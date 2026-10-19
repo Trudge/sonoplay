@@ -32,46 +32,43 @@ logger = logging.getLogger(__name__)
 _data_lock = threading.RLock()
 
 
-def atomic_write_json(path: Path, data: dict) -> None:
-    """Write JSON data atomically using temp file + rename.
-    
-    This prevents data corruption if the process is killed or crashes
-    during a write operation.  Falls back to direct write if the temp
-    file cannot be created (e.g. directory owned by root in Docker).
+def _private_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        logger.warning("Unable to restrict permissions on config directory %s", path)
+
+
+def atomic_write_json(path: Path, data: dict, fsync: bool = True) -> None:
+    """Atomically write JSON with owner-only permissions.
+
+    Uses a random temp file in the destination directory so another local
+    principal cannot pre-create or symlink it. The final file is chmod 0600.
     """
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    
-    # Write to temp file in same directory (for atomic rename)
-    temp_path = path.with_suffix(path.suffix + ".tmp")
-    
+    _private_dir(path.parent)
+
+    import tempfile
+
+    fd, temp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
+    )
+    temp_path = Path(temp_name)
     try:
-        with open(temp_path, mode="w") as f:
+        with os.fdopen(fd, "w") as f:
+            os.fchmod(f.fileno(), 0o600)
             json.dump(data, f, indent=4)
             f.flush()
-            os.fsync(f.fileno())  # Ensure data is on disk
-        
-        # Atomic rename (works on POSIX, overwrites target if exists)
+            if fsync:
+                os.fsync(f.fileno())
         os.replace(temp_path, path)
-    except PermissionError:
-        # Fallback: direct write when we lack directory write permission
-        # (e.g. Docker volume owned by root, app running as non-root user)
-        logger.warning(
-            "Cannot create temp file for atomic write in %s "
-            "(permission denied). Falling back to direct write.",
-            path.parent,
-        )
-        with open(path, mode="w") as f:
-            json.dump(data, f, indent=4)
-            f.flush()
-            os.fsync(f.fileno())
+        os.chmod(path, 0o600)
     except Exception:
-        # Clean up temp file on failure
-        if temp_path.exists():
-            try:
-                temp_path.unlink()
-            except Exception as e:
-                logger.debug("Expected cleanup error removing temp file: %s", e)
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
         raise
 
 
@@ -114,6 +111,9 @@ class Settings(BaseSettings):
     http_timeout_connect: float = 5.0   # Connection timeout
     http_timeout_plex_tv: float = 10.0  # Timeout for plex.tv API requests
     http_timeout_dlna: float = 10.0     # Timeout for local DLNA device requests (was 5.0, see issue #10)
+    dlna_read_timeout: float = 3.0
+    dlna_write_timeout: float = 5.0
+    dlna_read_retries: int = 2
     
     # Subscription and polling settings
     subscriber_ttl_seconds: int = 300   # How long before idle subscribers are cleaned up
@@ -128,11 +128,16 @@ class Settings(BaseSettings):
     auth_session_ttl_hours: int = 24
     auth_cookie_secure: bool = False    # Set true when served over HTTPS
     auth_client_identifier: str = "sonoplay-web"
+    auth_allow_any_user: bool = False
+    auth_rate_limit_per_minute: int = 30
+    trusted_hosts: str = ""            # Comma-separated Host allowlist
+    allow_loopback_subscribers: bool = False
     # Override the PMS address used in stream URLs sent to DLNA speakers.
     # Needed when Plexamp connects to PMS via WAN/external IP (remote access mode)
     # but hairpin NAT is unavailable — speakers can't reach PMS via WAN IP.
     # Set to PMS's LAN IP (e.g. PMS_ADDRESS=192.168.1.100) to force local routing.
     pms_address: str | None = None
+    pms_port: int = 32400
 
     def __init__(self, **values):
         super().__init__(**values)
@@ -166,10 +171,14 @@ class Settings(BaseSettings):
             if cache is not None:
                 return cache
             p = Path(self.config_path).joinpath(self.data_file_name)
-            p.parent.mkdir(parents=True, exist_ok=True)
+            _private_dir(p.parent)
             if not p.exists():
                 object.__setattr__(self, "_data_cache", {})
                 return self._data_cache
+            try:
+                os.chmod(p, 0o600)
+            except OSError:
+                pass
             try:
                 with open(p) as f:
                     j = json.load(f)
@@ -179,10 +188,10 @@ class Settings(BaseSettings):
                 object.__setattr__(self, "_data_cache", {})
                 return self._data_cache
 
-    def save_data(self, data):
+    def save_data(self, data, fsync: bool = True):
         with _data_lock:
             p = Path(self.config_path).joinpath(self.data_file_name)
-            atomic_write_json(p, data)
+            atomic_write_json(p, data, fsync=fsync)
             object.__setattr__(self, "_data_cache", data)
 
     def get_token_for_uuid(self, uuid):
@@ -217,7 +226,7 @@ class Settings(BaseSettings):
             mutator(merged)
             info['stats'] = merged
             data[uuid] = info
-            self.save_data(data)
+            self.save_data(data, fsync=False)
 
     def update_device_stats(self, uuid, **kwargs):
         def mutator(stats):

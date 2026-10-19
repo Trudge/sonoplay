@@ -1,11 +1,22 @@
 services:
   sonoplay:
-    build: .
+    build:
+      context: .
+      args:
+        PUID: ${PUID:-1001}
+        PGID: ${PGID:-3001}
     container_name: sonoplay
     hostname: sonoplay
     # network_mode: host required for DLNA/UPnP device discovery (SSDP multicast)
     network_mode: host
     restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
     ulimits:
       nofile:
         soft: 65536
@@ -18,7 +29,8 @@ services:
     volumes:
       - ./sonoplay-config:/config
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:32488/health').read()"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:32488/health').read()"]
       interval: 1m
       timeout: 10s
       retries: 3
+      start_period: 60s

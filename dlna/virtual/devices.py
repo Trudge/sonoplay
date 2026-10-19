@@ -9,6 +9,8 @@
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -22,7 +24,7 @@ from dotmap import DotMap  # type: ignore[import]
 
 logger = logging.getLogger(__name__)
 
-from settings import settings
+from settings import atomic_write_json, settings
 from utils import convert_volume, extract_value
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
@@ -84,12 +86,7 @@ async def _write_store(definitions: Iterable[Dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     data = list(definitions)
-
-    def _write() -> None:
-        with path.open("w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=4)
-
-    await asyncio.to_thread(_write)
+    await asyncio.to_thread(atomic_write_json, path, data)
 
 
 @dataclass
@@ -264,8 +261,12 @@ class VirtualDlnaDevice:
         return f"{type(result).__name__}"
 
     async def _fan_out(self, method_name: str, *args, **kwargs):
-        from plex.adapters import adapter_by_device  # local import to avoid cycle
-        
+        async with self._lock:
+            return await self._fan_out_locked(method_name, *args, **kwargs)
+
+    async def _fan_out_locked(self, method_name: str, *args, **kwargs):
+        from plex.adapters import adapter_by_device
+
         resolved, _ = await self._resolve_members()
         if not resolved:
             raise RuntimeError("Virtual device has no available members online")
@@ -342,14 +343,17 @@ class VirtualDlnaDevice:
 
     async def _aggregate_first(self, method_name: str, *args, **kwargs):
         resolved, _ = await self._resolve_members()
-        for device in resolved:
+
+        async def call(device):
             try:
                 method = getattr(device, method_name)
-                result = await method(*args, **kwargs)
-                if result is not None:
-                    return result
+                return await asyncio.wait_for(method(*args, **kwargs), timeout=5.0)
             except Exception:
-                continue
+                return None
+
+        for result in await asyncio.gather(*(call(device) for device in resolved)):
+            if result is not None:
+                return result
         return None
 
     async def handle_member_stop_request(self, adapter: "PlexDlnaAdapter") -> None:
@@ -701,11 +705,12 @@ class VirtualDlnaDevice:
             "members": list(self.member_uuids),
         }
 
-    async def member_details(self) -> List[Dict[str, Any]]:
+    async def member_details(self, resolved: Optional[List[DlnaDevice]] = None) -> List[Dict[str, Any]]:
         from plex.adapters import adapter_by_device
         from settings import settings as settings_singleton
 
-        resolved, missing = await self._resolve_members()
+        if resolved is None:
+            resolved, _ = await self._resolve_members()
         resolved_map = {d.uuid: d for d in resolved}
         details: List[Dict[str, Any]] = []
 
@@ -781,7 +786,7 @@ class VirtualDlnaDevice:
         from plex import pin_login
 
         resolved, missing = await self._resolve_members()
-        details = await self.member_details()
+        details = await self.member_details(resolved)
 
         overall_status = []
         current_track = None
@@ -826,9 +831,8 @@ class VirtualDlnaDevice:
                         f"{plex_lib.machine_id}/details?key={track_key}"
                     )
                 for attr in ["thumb", "art", "grandparentThumb", "parentThumb"]:
-                    url = getattr(track, attr, None)
-                    if url:
-                        artwork_urls.append(plex_lib.build_url(url, token=True))
+                    if getattr(track, attr, None):
+                        artwork_urls.append(f"/api/artwork/{self.uuid}/{attr}")
         if plex_client is None and virtual_adapter.plex_lib and virtual_adapter.plex_lib.address:
             plex_client = {
                 "protocol": virtual_adapter.plex_lib.protocol,
@@ -1002,7 +1006,14 @@ def list_virtual_devices() -> List[VirtualDlnaDevice]:
 
 async def list_virtual_devices_with_summaries() -> List[Dict[str, Any]]:
     devices = list_virtual_devices()
-    return [await device.summary() for device in devices]
+    results = await asyncio.gather(*(device.summary() for device in devices), return_exceptions=True)
+    summaries = []
+    for device, result in zip(devices, results):
+        if isinstance(result, Exception):
+            logger.warning("Unable to build summary for %s: %s", device.uuid, result.__class__.__name__)
+            continue
+        summaries.append(result)
+    return summaries
 
 
 async def get_virtual_device_by_uuid(uuid_value: str) -> Optional[VirtualDlnaDevice]:

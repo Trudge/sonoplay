@@ -100,6 +100,7 @@ class SubscribeManager(object):
         s = self.get_subscriber(target_uuid, client_uuid)
         if s is not None:
             s.command_id = command_id
+            s.last_seen = datetime.now(timezone.utc)
 
     async def add_subscriber(self,
                        target_uuid: str,
@@ -115,6 +116,7 @@ class SubscribeManager(object):
                 await self.remove_subscriber(s.uuid)
             else:
                 s.command_id = command_id
+                s.last_seen = datetime.now(timezone.utc)
                 return
         l = self.subscribers.get(target_uuid, [])
         l.append(Subscriber(client_uuid, host, port, self, protocol, command_id))
@@ -122,19 +124,22 @@ class SubscribeManager(object):
 
     async def remove_subscriber(self, uuid, target_uuid: str = None):
         logger.info("remove sub %s from %s", uuid, target_uuid)
-        for tu in [target_uuid] if target_uuid is not None else self.subscribers.keys():
-            l = self.subscribers.get(tu, [])
-            remove = None
-            for s in l:
-                if s.uuid == uuid:
-                    remove = s
+        targets = [target_uuid] if target_uuid is not None else list(self.subscribers.keys())
+        empty_targets = []
+        for tu in targets:
+            subscribers = self.subscribers.get(tu, [])
+            for subscriber in list(subscribers):
+                if subscriber.uuid == uuid:
+                    subscribers.remove(subscriber)
                     break
-            if remove in l:
-                l.remove(remove)
-            if len(l) == 0:
-                device = await get_device_by_uuid(tu)
-                if device is not None and len(self.subscribers.get(tu, [])) == 0 and hasattr(device, "stop_subscribe"):
-                    device.stop_subscribe()
+            if not subscribers:
+                empty_targets.append(tu)
+        for tu in empty_targets:
+            if self.subscribers.get(tu):
+                continue
+            device = await get_device_by_uuid(tu)
+            if device is not None and hasattr(device, "stop_subscribe"):
+                device.stop_subscribe()
 
     def stop(self):
         self.running = False
@@ -206,6 +211,8 @@ class SubscribeManager(object):
 
     async def notify_device(self, device):
         subs = self.subscribers.get(device.uuid, [])
+        if not subs:
+            return
         adapter = await adapter_by_device(device)
         if adapter.no_notice:
             logger.debug("ignore sub notice for %s", adapter.dlna.name)
@@ -251,7 +258,10 @@ class SubscribeManager(object):
                 wait_tasks = []
                 for device in target_devices:
                     adapter = await adapter_by_device(device)
-                    wait_tasks.append(asyncio.create_task(adapter.wait_for_event(wait_timeout)))
+                    wait_tasks.append(asyncio.create_task(adapter.wait_for_event(
+                        wait_timeout,
+                        interesting_fields=["state", "volume", "current_uri"],
+                    )))
                 done, pending = await asyncio.wait(wait_tasks,
                                                    timeout=wait_timeout,
                                                    return_when=asyncio.FIRST_COMPLETED)
@@ -292,6 +302,7 @@ class Subscriber(object):
                                    timeout=1) as response:
                 response.raise_for_status()
                 self.consecutive_errors = 0
+                self.last_seen = datetime.now(timezone.utc)
         except Exception as e:
             self.consecutive_errors += 1
             resp_text = 'None'

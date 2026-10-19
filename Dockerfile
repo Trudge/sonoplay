@@ -1,4 +1,4 @@
-FROM python:3.14-slim AS builder
+FROM python:3.14-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170 AS builder
 
 WORKDIR /app
 
@@ -11,15 +11,15 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-COPY pyproject.toml requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY pyproject.toml requirements.txt requirements.lock ./
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 
-# Copy source and install package
+# Copy source and install package without re-resolving dependencies
 COPY src/ src/
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir --no-deps .
 
 # --- Final stage: slim runtime image ---
-FROM python:3.14-slim
+FROM python:3.14-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170
 
 WORKDIR /app
 
@@ -28,16 +28,21 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends liblzma5 \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
-RUN groupadd -r sonoplay && useradd -r -g sonoplay -d /app -s /sbin/nologin sonoplay
+# Create non-root user matching the host bind-mount owner.
+ARG PUID=1001
+ARG PGID=3001
+RUN groupadd -g "${PGID}" sonoplay \
+    && useradd -u "${PUID}" -g sonoplay -d /app -s /sbin/nologin sonoplay
 
 # Copy installed packages from builder
 COPY --from=builder /usr/local/lib/python3.14/site-packages /usr/local/lib/python3.14/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
-# pip is not needed at runtime but is shipped in the base image; keep the
-# copy patched for the CVEs fixed in 26.2.x.
-RUN python -m pip install --no-cache-dir --upgrade "pip>=26.2.0"
+# pip is a build tool, not a runtime dependency. Removing it also removes
+# its CVE surface from the shipped image.
+RUN rm -rf /usr/local/lib/python3.14/site-packages/pip \
+           /usr/local/lib/python3.14/site-packages/pip-*.dist-info \
+           /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.14
 
 # Copy application code
 COPY templates/ templates/
@@ -58,14 +63,11 @@ RUN chown -R sonoplay:sonoplay /app
 # the ownership when creating an empty volume at runtime.
 RUN mkdir -p /config && chown sonoplay:sonoplay /config
 
-ENV HTTP_PORT=32488 CONFIG_PATH=/config
+ENV HTTP_PORT=32488 CONFIG_PATH=/config PYTHONDONTWRITEBYTECODE=1
 EXPOSE 1910/udp 32412/udp $HTTP_PORT
 VOLUME /config
 
 # Switch to non-root user
 USER sonoplay
 
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:${HTTP_PORT}/health')" || exit 1
-
-CMD ["python", "-O", "main.py"]
+CMD ["sh", "-c", "umask 077 && exec python -O main.py"]

@@ -1,7 +1,9 @@
 import asyncio
+import ipaddress
 import logging
 import socket
 import time
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +22,29 @@ SSDP_SEARCH_TARGETS = [
 
 SEND_INTERVAL_SECS = 30
 RECENTLY_SEEN_THROTTLE_SECS = 60  # Ignore repeat announcements within this window
+
+
+def is_safe_dlna_url(url: str, base_url: str | None = None) -> bool:
+    """Only allow HTTP(S) URLs pointing at a private LAN address."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return False
+        address = ipaddress.ip_address(parsed.hostname)
+    except ValueError:
+        return False
+    if address.is_loopback or address.is_link_local or address.is_multicast or address.is_unspecified:
+        return False
+    if not address.is_private:
+        return False
+    if base_url is not None:
+        try:
+            base = urlparse(base_url)
+            if ipaddress.ip_address(base.hostname) != address:
+                return False
+        except ValueError:
+            return False
+    return True
 
 
 def build_msearch(st: str):
@@ -82,6 +107,17 @@ def get_protocol(discover):
             location = device.get('location')
             if not location:
                 return
+            if not is_safe_dlna_url(location):
+                logger.warning("ignoring unsafe SSDP LOCATION: %s", location)
+                return
+            try:
+                source_ip = ipaddress.ip_address(addr[0])
+                location_ip = ipaddress.ip_address(urlparse(location).hostname)
+                if source_ip != location_ip:
+                    logger.warning("ignoring SSDP LOCATION from mismatched source: %s", location)
+                    return
+            except ValueError:
+                return
             asyncio.create_task(discover.on_new_device(location))
 
         def error_received(self, exc):
@@ -101,6 +137,7 @@ class DlnaDiscover(object):
         self.new_device_callback = new_device_callback
         self.protocol = None
         self.socket = None
+        self.transport = None
         self._pending_locations = set()
         self._recently_seen_locations = {}  # location -> timestamp
 
@@ -168,4 +205,19 @@ class DlnaDiscover(object):
         self.init_socket()
         if loop is None:
             loop = asyncio.get_running_loop()
-        await loop.create_datagram_endpoint(get_protocol(self), sock=self.socket)
+        self.transport, _ = await loop.create_datagram_endpoint(get_protocol(self), sock=self.socket)
+
+    def stop(self):
+        if self.transport is not None:
+            try:
+                self.transport.close()
+            except Exception:
+                pass
+            self.transport = None
+        if self.socket is not None:
+            try:
+                self.socket.close()
+            except Exception:
+                pass
+            self.socket = None
+        self.protocol = None

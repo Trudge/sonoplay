@@ -20,6 +20,7 @@
 # (at your option) any later version.
 
 import asyncio
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta, datetime, timezone
 import logging
@@ -27,6 +28,7 @@ import math
 import random
 import time
 from threading import Thread, current_thread
+from urllib.parse import urlparse
 import weakref
 from typing import TYPE_CHECKING, Optional
 
@@ -46,6 +48,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 adapters = {}
 _adapters_lock = asyncio.Lock()
+_PLEX_CONNECTION_CACHE: dict[tuple[str, str], tuple[float, tuple[str, str, str]]] = {}
 
 # Stats persistence does a JSON read-modify-write with fsync; running it on
 # the event loop stalls every request during playback transitions. A single
@@ -71,17 +74,20 @@ async def adapter_by_device(device, query_params: QueryParams = None):
 
 
 async def remove_adapter(adapter):
-    """Remove an adapter and clean up its resources."""
+    """Remove an adapter and clean up its resources without blocking the loop."""
     async with _adapters_lock:
-        if adapter.dlna.uuid in adapters:
-            # Cancel the Plex.tv registration task
-            plex_tv_task = getattr(adapter, '_plex_tv_task', None)
-            if plex_tv_task is not None and not plex_tv_task.done():
-                plex_tv_task.cancel()
-            # Shutdown the state thread before removing
-            if hasattr(adapter, 'state') and adapter.state is not None:
-                adapter.state.shutdown()
-            del adapters[adapter.dlna.uuid]
+        if adapter.dlna.uuid not in adapters:
+            return
+        # Cancel the Plex.tv registration task
+        plex_tv_task = getattr(adapter, '_plex_tv_task', None)
+        if plex_tv_task is not None and not plex_tv_task.done():
+            plex_tv_task.cancel()
+        del adapters[adapter.dlna.uuid]
+
+    # Joining a state thread can block for up to the DLNA timeout. Do it off
+    # the event loop and outside the registry lock.
+    if getattr(adapter, 'state', None) is not None:
+        await asyncio.to_thread(adapter.state.shutdown)
 
 
 class PlexLib(object):
@@ -109,14 +115,75 @@ class PlexLib(object):
         return url
 
     def update(self, query: QueryParams):
+        """Accept only identity/credential fields from a Plex client.
+
+        Network location is resolved server-side from plex.tv or PMS_ADDRESS;
+        a client must not be able to point SonoPlay at an arbitrary address.
+        """
         if query is None:
             return
-        self.protocol = query.get("protocol", self.protocol)
-        self.address = query.get("address", self.address)
-        self.port = int(query.get("port", self.port))
         self.token = query.get("token", self.token)
         self.machine_id = query.get("machineIdentifier", self.machine_id)
         self.client_identifier = query.get("clientIdentifier", self.client_identifier)
+
+    async def resolve_connection(self) -> None:
+        """Populate protocol/address/port from trusted configuration or plex.tv."""
+        if settings.pms_address:
+            self.protocol = "http"
+            self.address = settings.pms_address
+            self.port = str(settings.pms_port)
+            return
+        if self.address and self.protocol and self.port:
+            return
+        if not self.token or not self.machine_id:
+            raise RuntimeError("Plex connection is not resolved (missing token or machine id)")
+
+        cache_key = (self.machine_id, hashlib.sha256(self.token.encode("utf-8")).hexdigest())
+        cached = _PLEX_CONNECTION_CACHE.get(cache_key)
+        now = time.time()
+        if cached is not None and cached[0] > now:
+            self.protocol, self.address, self.port = cached[1]
+            return
+
+        timeout = aiohttp.ClientTimeout(total=settings.http_timeout_plex_tv)
+        headers = {
+            "Accept": "application/json",
+            "X-Plex-Token": self.token,
+            "X-Plex-Client-Identifier": self.client_identifier or self.machine_id,
+        }
+        async with g.http.get(
+            "https://plex.tv/api/v2/resources",
+            params={"includeHttps": "1", "includeRelay": "1"},
+            headers=headers,
+            timeout=timeout,
+        ) as response:
+            response.raise_for_status()
+            resources = await response.json(content_type=None)
+
+        selected = None
+        for resource in resources if isinstance(resources, list) else []:
+            if resource.get("clientIdentifier") != self.machine_id:
+                continue
+            connections = [
+                c for c in resource.get("connections", [])
+                if c.get("protocol") in ("http", "https") and c.get("uri")
+            ]
+            connections.sort(key=lambda c: (not bool(c.get("local")), c.get("relay", False)))
+            selected = connections[0] if connections else None
+            break
+        if selected is None:
+            raise RuntimeError("No reachable Plex Media Server connection found")
+
+        parsed = urlparse(selected["uri"])
+        if not parsed.hostname:
+            raise RuntimeError("Plex Media Server connection has no hostname")
+        self.protocol = parsed.scheme
+        self.address = parsed.hostname
+        self.port = str(parsed.port or (443 if parsed.scheme == "https" else 80))
+        _PLEX_CONNECTION_CACHE[cache_key] = (
+            now + 600,
+            (self.protocol, self.address, self.port),
+        )
 
     def request_headers(self, *, accept_json: bool = False) -> dict:
         headers = {}
@@ -372,13 +439,6 @@ class DlnaState(object):
             self.current_uri = position_info.TrackURI
             self.current_track_duration = int(
                 parse_timedelta(position_info.TrackDuration).total_seconds() * 1000)
-            if not state and not self._changed_state and self.state in ("TRANSITIONING", "PLAYING"):
-                if __debug__:
-                    logger.debug("dlna %s no elapsed change? retry state", self.dlna.name)
-                try:
-                    state.result = await self.dlna.GetTransportInfo(client=client)
-                except Exception:
-                    logger.exception("Unexpected error retrying GetTransportInfo")
         if state and state.result:
             state = state.result
             self.state = state.CurrentTransportState
@@ -412,6 +472,8 @@ class DlnaState(object):
             # Watched but idle: no position to track, relax the SOAP chatter.
             # Commands wake the loop immediately via looping_wait_event.
             return 5.0
+        if self.state == "PAUSED_PLAYBACK":
+            return 2.0
         return 0.8
 
     async def wait_for_next_loop(self):
@@ -940,6 +1002,7 @@ class PlexDlnaAdapter(object):
         self.state.touch_access_time()
         if query_params is not None:
             self.plex_lib.update(query_params)
+        await self.plex_lib.resolve_connection()
 
         controller = self.virtual_controller()
         if controller is not None:
@@ -1032,7 +1095,7 @@ class PlexDlnaAdapter(object):
             # is available (devices that lack the action return immediately).
             wait_ready = getattr(self.dlna, "wait_for_can_play", None)
             if wait_ready is not None:
-                await wait_ready(max_wait=2.0)
+                await asyncio.wait_for(wait_ready(max_wait=2.0), timeout=3.0)
             else:
                 await asyncio.sleep(0.1)
             await self.play()
@@ -1183,23 +1246,33 @@ class PlexDlnaAdapter(object):
         return mute.CurrentMute
 
     def start_plex_tv_notify(self):
+        old_task = getattr(self, "_plex_tv_task", None)
+        if old_task is not None and not old_task.done():
+            old_task.cancel()
         self._plex_tv_task = asyncio.create_task(
             self._update_plex_tv_connection_loop(),
             name=f"plex_tv_notify_{self.dlna.name}"
         )
 
     async def _update_plex_tv_connection_loop(self):
+        delay = 60
         try:
             while True:
                 try:
                     await self.update_plex_tv_connection()
+                    delay = 60
                 except asyncio.CancelledError:
                     raise
                 except asyncio.TimeoutError:
                     logger.debug("Plex TV connection update timed out for %s", self.dlna.name)
-                except Exception:
-                    logger.exception("Unexpected error updating Plex TV connection")
-                await asyncio.sleep(60)
+                    delay = min(delay * 2, 600)
+                except Exception as exc:
+                    logger.warning(
+                        "Plex TV connection update failed for %s: %s",
+                        self.dlna.name, exc.__class__.__name__,
+                    )
+                    delay = min(delay * 2, 600)
+                await asyncio.sleep(delay)
         except asyncio.CancelledError:
             logger.debug("Plex TV connection loop cancelled for %s", self.dlna.name)
 
@@ -1212,9 +1285,17 @@ class PlexDlnaAdapter(object):
                 return
         headers = pms_header(self.dlna)
         headers["X-Plex-Token"] = self.plex_bind_token
-        await g.http.put(f"https://plex.tv/devices/{self.dlna.uuid}",
-                         data={"Connection[][uri]": f"http://{settings.host_ip}:{settings.http_port}"},
-                         headers=headers)
+        async with g.http.put(
+            f"https://plex.tv/devices/{self.dlna.uuid}",
+            data={"Connection[][uri]": f"http://{settings.host_ip}:{settings.http_port}"},
+            headers=headers,
+        ) as response:
+            if response.status in (401, 403, 404):
+                logger.warning("Plex token rejected for %s; clearing link", self.dlna.name)
+                settings.set_token_for_uuid(self.dlna.uuid, None)
+                self.plex_bind_token = None
+                return
+            response.raise_for_status()
 
     def update_state(self, info):
         if info.propertyset:

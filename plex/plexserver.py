@@ -20,7 +20,8 @@
 # (at your option) any later version.
 
 from fastapi import FastAPI, Request, Header, Query, HTTPException, Form
-from fastapi.responses import JSONResponse, RedirectResponse, Response
+import ipaddress
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from html import escape as xml_escape
 from pydantic import BaseModel, Field
 import uvicorn
@@ -110,6 +111,42 @@ plex_server = FastAPI(
 s = plex_server
 plex_server.mount("/static", StaticFiles(directory="static"), name="static")
 plex_auth.install_middleware(plex_server)
+try:
+    from starlette.middleware.gzip import GZipMiddleware
+    plex_server.add_middleware(GZipMiddleware, minimum_size=1024)
+except ImportError:  # test stubs may replace starlette
+    pass
+
+if settings.trusted_hosts:
+    try:
+        from starlette.middleware.trustedhost import TrustedHostMiddleware
+        plex_server.add_middleware(
+            TrustedHostMiddleware,
+            allowed_hosts=[h.strip() for h in str(settings.trusted_hosts).split(",") if h.strip()],
+        )
+    except ImportError:  # test stubs may replace starlette
+        pass
+
+
+@plex_server.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Permissions-Policy", "geolocation=(), microphone=(), camera=()"
+    )
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; "
+        "connect-src 'self'; frame-ancestors 'self'",
+    )
+    if request.url.path.startswith("/static/"):
+        response.headers.setdefault("Cache-Control", "public, max-age=604800")
+    return response
 
 
 # Global handler: when a DLNA device becomes unreachable mid-request,
@@ -138,18 +175,40 @@ async def on_new_dlna_device(location_url):
     except Exception as exc:
         logger.warning("failed to init dlna device from %s: %s", location_url, exc)
         return
+    for existing in list(devices):
+        if existing.uuid == device.uuid:
+            existing.location_url = location_url
+            return
     logger.info("got new dlna device from %s", device.name)
+    from dlna.dlna_device import add_device
+    await add_device(device)
     asyncio.create_task(device.loop_subscribe(), name=f"dlna sub {device.name}")
-    devices.append(device)
     adapter = await adapter_by_device(device)
     settings.mark_device_status(device.uuid, "online")
     adapter.start_plex_tv_notify()
     gdm = PlexGDM(device)
     gdm.run()
+    device.gdm = gdm
     _gdm_instances.append(gdm)
 
 
 _gdm_instances: list = []
+_devices_cache: tuple[float, dict] | None = None
+_virtual_devices_cache: tuple[float, dict] | None = None
+_subscriber_task: asyncio.Task | None = None
+
+
+async def _run_subscriber_loop():
+    """Restart the subscriber loop if it fails unexpectedly."""
+    while True:
+        try:
+            await sub_man.start()
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Subscriber loop crashed; restarting in 5s")
+            await asyncio.sleep(5)
 
 dlna_discover = DlnaDiscover(on_new_dlna_device)
 
@@ -172,20 +231,21 @@ def _count_user_configured_devices() -> int:
 async def guess_host_ip(request: Request):
     if settings.host_ip not in (None, "0.0.0.0"):
         return
-    host = request.url.hostname or ""
-    if host.startswith("127.") or host == "0.0.0.0":
-        client_host = request.client.host if request.client else ""
-        if client_host and not client_host.startswith("127.") and client_host != "0.0.0.0":
-            host = client_host
-        else:
-            return
+    # Never trust the Host header here: it is sent to plex.tv as our
+    # advertised connection URI and is also used for DLNA callbacks.
+    from dlna.discover import guess_local_ip
+    host = guess_local_ip()
+    if host in (None, "", "0.0.0.0", "127.0.0.1"):
+        logger.warning("unable to determine local host IP; set HOST_IP explicitly")
+        return
     settings.host_ip = host
     logger.info("guessed host ip %s", settings.host_ip)
     target_devices = list(devices)
     target_devices.extend(list_virtual_devices())
     for device in target_devices:
         adapter = await adapter_by_device(device)
-        asyncio.create_task(adapter.update_plex_tv_connection())
+        task = asyncio.create_task(adapter.update_plex_tv_connection())
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() and t.exception() else None)
 
 
 async def build_response(content: str, device: DlnaDevice = None, target_uuid: str = None, status_code: int = 200,
@@ -234,7 +294,8 @@ async def on_startup():
     )
     g.http = aiohttp.ClientSession(timeout=timeout)
     await dlna_discover.discover()
-    asyncio.create_task(sub_man.start())
+    global _subscriber_task
+    _subscriber_task = asyncio.create_task(_run_subscriber_loop(), name="subscriber-loop")
     await sub_man.start_cleanup_task()
     await get_device_data()
     await load_virtual_devices()
@@ -246,6 +307,10 @@ async def on_startup():
 async def on_shutdown():
     await sub_man.stop_cleanup_task()
     sub_man.stop()
+    if _subscriber_task is not None and not _subscriber_task.done():
+        _subscriber_task.cancel()
+        await asyncio.gather(_subscriber_task, return_exceptions=True)
+    dlna_discover.stop()
     # Stop all GDM instances to release UDP sockets
     for gdm in _gdm_instances:
         try:
@@ -261,7 +326,7 @@ async def on_shutdown():
         if adapter.queue is not None:
             stop_tasks.append(adapter.stop())
         stop_tasks.append(device.remove_self())
-    await asyncio.gather(*stop_tasks)
+    await asyncio.gather(*stop_tasks, return_exceptions=True)
     if g.http:
         await g.http.close()
 
@@ -285,6 +350,8 @@ async def health():
 @s.get("/auth/login")
 async def auth_login(request: Request):
     """Start the Plex PIN login flow for the local UI."""
+    if not plex_auth.rate_limit(request, "login", limit=max(5, settings.auth_rate_limit_per_minute // 3)):
+        return JSONResponse({"detail": "Too many login attempts"}, status_code=429)
     if not settings.auth_enabled:
         return RedirectResponse("/", status_code=303)
 
@@ -313,10 +380,12 @@ async def auth_login(request: Request):
 
 
 @s.get("/auth/check")
-async def auth_check(pin_id: str):
+async def auth_check(request: Request, pin_id: str):
     """Poll a Plex PIN and create a session once the user approves it."""
     if not settings.auth_enabled:
         return JSONResponse({"status": "disabled"}, status_code=404)
+    if not plex_auth.rate_limit(request, "check"):
+        return JSONResponse({"status": "rate_limited"}, status_code=429)
     if not pin_id.isdigit() or len(pin_id) > 32:
         return JSONResponse({"status": "invalid"}, status_code=400)
 
@@ -458,12 +527,18 @@ async def virtual_devices_page(request: Request):
 
 @s.get("/api/virtual-devices")
 async def api_virtual_devices():
+    global _virtual_devices_cache
+    now = time.monotonic()
+    if _virtual_devices_cache is not None and now - _virtual_devices_cache[0] < 2:
+        return _virtual_devices_cache[1]
     virtual_devices = await list_virtual_devices_with_summaries()
     physical_devices = await list_physical_device_snapshots()
-    return {
+    payload = {
         "virtual_devices": virtual_devices,
         "physical_devices": physical_devices,
     }
+    _virtual_devices_cache = (now, payload)
+    return payload
 
 
 @s.get("/api/onboarding")
@@ -620,8 +695,13 @@ async def api_delete_virtual_device(virtual_uuid: str):
 @s.get("/api/devices")
 async def api_devices(request: Request):
     """API endpoint that returns device list with extended metadata including current track info."""
+    global _devices_cache
     await guess_host_ip(request)
+    now = time.monotonic()
+    if _devices_cache is not None and now - _devices_cache[0] < 2:
+        return _devices_cache[1]
     devices_list = []
+    pin_requests = []
     
     for d in devices:
         adapter = await adapter_by_device(d)
@@ -665,11 +745,8 @@ async def api_devices(request: Request):
                     current_track['plex_web_url'] = f"{plex_lib.protocol}://{plex_lib.address}:{plex_lib.port}/web/index.html#!/server/{plex_lib.machine_id}/details?key={track_key}"
                 
                 for attr in ['thumb', 'art', 'grandparentThumb', 'parentThumb']:
-                    url = getattr(track, attr, None)
-                    if url:
-                        # Build full URL with Plex token
-                        full_url = plex_lib.build_url(url, token=True)
-                        artwork_urls.append(full_url)
+                    if getattr(track, attr, None):
+                        artwork_urls.append(f"/api/artwork/{d.uuid}/{attr}")
         
         device_data = {
             'uuid': d.uuid,
@@ -687,18 +764,28 @@ async def api_devices(request: Request):
             'plex_client': plex_client,
         }
         
-        # Add PIN info for unbinded devices
         if not device_data['binded']:
-            pin, pin_id = await pin_login.get_pin(d)
-            device_data['pin'] = pin
-            device_data['pin_id'] = pin_id
-        
+            pin_requests.append((device_data, d))
+
         devices_list.append(device_data)
-    
-    return {
+
+    if pin_requests:
+        results = await asyncio.gather(
+            *(pin_login.get_pin(device) for _, device in pin_requests),
+            return_exceptions=True,
+        )
+        for (device_data, _), result in zip(pin_requests, results):
+            if isinstance(result, Exception):
+                logger.warning("Unable to fetch Plex PIN for %s: %s", device_data['uuid'], result.__class__.__name__)
+                continue
+            device_data['pin'], device_data['pin_id'] = result
+
+    payload = {
         "devices": devices_list,
         "total_devices": len(devices_list)
     }
+    _devices_cache = (now, payload)
+    return payload
 
 
 @s.post("/")
@@ -784,8 +871,15 @@ async def dlna_subscribe(request: Request, uuid: str):
     ):
         raise HTTPException(403, "Invalid callback token")
     adapter = await adapter_by_device(await get_device_by_uuid(uuid))
-    b = await request.body()
-    info = xml2dict(b)
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > 256 * 1024:
+            raise HTTPException(413, "Callback body too large")
+    try:
+        info = xml2dict(bytes(body))
+    except ValueError:
+        raise HTTPException(400, "Invalid callback XML")
     if adapter is not None:
         adapter.update_state(info)
     return ""
@@ -827,6 +921,8 @@ async def refresh_play_queue(request: Request,
     if device is None:
         raise HTTPException(404)
     adapter = await adapter_by_device(device, request.query_params)
+    if adapter.queue is None:
+        raise HTTPException(409, "No active play queue")
     await adapter.refresh_queue(playQueueID)
     return await build_response("", device=device)
 
@@ -967,6 +1063,8 @@ async def set_parameters(commandID: int,
         if shuffle is not None:
             adapter.shuffle = shuffle
         if repeat is not None:
+            if adapter.queue is None:
+                raise HTTPException(409, "No active play queue")
             adapter.queue.repeat = repeat
         if volume is not None:
             await adapter.set_volume(int(volume))
@@ -1010,7 +1108,6 @@ async def timeline_poll(request: Request,
         msg = msg.format(command_id=commandID)
         if datetime.now(timezone.utc) - begin_time >= timedelta(milliseconds=500):
             logger.debug(f"Slow poll request: {redact_secrets(request.url)} took {datetime.now(timezone.utc) - begin_time}")
-        asyncio.create_task(sub_man.notify_server_device(device, force=True))
         return await build_response(msg, device=device, headers=timeline_poll_headers(device))
     finally:
         async with _poll_lock:
@@ -1025,11 +1122,24 @@ async def subscribe(request: Request,
                     target_uuid: str = Header(None, alias="x-plex-target-client-identifier"),
                     client_uuid: str = Header(None, alias="x-plex-client-identifier")):
     require_valid_uuid(target_uuid)
+    if protocol not in ("http", "https"):
+        raise HTTPException(400, "Invalid subscriber protocol")
+    if not 1 <= port <= 65535:
+        raise HTTPException(400, "Invalid subscriber port")
+    client_host = request.client.host if request.client else ""
+    try:
+        client_ip = ipaddress.ip_address(client_host)
+    except ValueError:
+        raise HTTPException(400, "Invalid subscriber address")
+    if client_ip.is_unspecified or client_ip.is_multicast or client_ip.is_link_local:
+        raise HTTPException(400, "Invalid subscriber address")
+    if client_ip.is_loopback and not settings.allow_loopback_subscribers:
+        raise HTTPException(400, "Loopback subscribers are disabled")
     await guess_host_ip(request)
     device = await get_device_by_uuid(target_uuid)
     if device is None:
         raise HTTPException(404, f"device not found {target_uuid}")
-    await sub_man.add_subscriber(target_uuid, client_uuid, request.client.host, port, protocol=protocol, command_id=commandID)
+    await sub_man.add_subscriber(target_uuid, client_uuid, client_host, port, protocol=protocol, command_id=commandID)
     return await build_response(XML_OK, target_uuid=target_uuid)
 
 
@@ -1043,6 +1153,97 @@ async def unsubscribe(request: Request,
     sub_man.update_command_id(target_uuid, client_uuid, commandID)
     await sub_man.remove_subscriber(client_uuid, target_uuid=target_uuid)
     return await build_response(XML_OK, target_uuid=target_uuid)
+
+
+ARTWORK_KINDS = {"thumb", "art", "grandparentThumb", "parentThumb"}
+
+
+@s.get("/api/artwork/{uuid}/{kind}")
+async def api_artwork(uuid: str, kind: str):
+    """Proxy Plex artwork without exposing the Plex token to the browser."""
+    require_valid_uuid(uuid)
+    if kind not in ARTWORK_KINDS:
+        raise HTTPException(404)
+    device = await get_device_by_uuid(uuid)
+    if device is None:
+        raise HTTPException(404)
+    adapter = await adapter_by_device(device)
+    track = adapter.current_track_info
+    resource = getattr(track, kind, None) if track is not None else None
+    if not isinstance(resource, str) or not resource.startswith("/"):
+        raise HTTPException(404)
+    if not adapter.plex_lib.token:
+        adapter.plex_lib.token = settings.get_token_for_uuid(uuid) or ""
+    if not adapter.plex_lib.token:
+        raise HTTPException(404)
+    await adapter.plex_lib.resolve_connection()
+    url = adapter.plex_lib.build_url(resource, token=True)
+    async with g.http.get(url) as upstream:
+        if upstream.status != 200:
+            raise HTTPException(404)
+        content = await upstream.read()
+        media_type = upstream.headers.get("Content-Type", "application/octet-stream")
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Cache-Control": "private, max-age=300"},
+    )
+
+
+@s.api_route("/stream/{stream_token}", methods=["GET", "HEAD"])
+async def stream_media(request: Request, stream_token: str):
+    """Proxy Plex media so DLNA renderers never receive a Plex token."""
+    decoded = plex_auth.verify_stream_token(stream_token)
+    if decoded is None:
+        raise HTTPException(403, "Invalid or expired stream token")
+    uuid, resource = decoded
+    device = await get_device_by_uuid(uuid)
+    if device is None:
+        raise HTTPException(404)
+    adapter = await adapter_by_device(device)
+    if not adapter.plex_lib.token:
+        adapter.plex_lib.token = settings.get_token_for_uuid(uuid) or ""
+    if not adapter.plex_lib.token:
+        raise HTTPException(404)
+    await adapter.plex_lib.resolve_connection()
+    url = adapter.plex_lib.build_url(resource, token=True)
+    headers = {}
+    for name in ("Range", "If-Range", "If-Modified-Since", "If-None-Match"):
+        value = request.headers.get(name)
+        if value:
+            headers[name] = value
+
+    method = "HEAD" if request.method == "HEAD" else "GET"
+    upstream = await g.http.request(method, url, headers=headers)
+    if upstream.status >= 400:
+        status = upstream.status
+        upstream.close()
+        raise HTTPException(status, "Plex media request failed")
+
+    passthrough = {}
+    for name in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified"):
+        value = upstream.headers.get(name)
+        if value:
+            passthrough[name] = value
+    passthrough.setdefault("Cache-Control", "private, no-store")
+
+    if method == "HEAD":
+        upstream.close()
+        return Response(status_code=upstream.status, headers=passthrough)
+
+    async def body():
+        try:
+            async for chunk in upstream.content.iter_chunked(65536):
+                yield chunk
+        finally:
+            upstream.close()
+
+    return StreamingResponse(
+        body(),
+        status_code=upstream.status,
+        media_type=upstream.headers.get("Content-Type"),
+        headers=passthrough,
+    )
 
 
 @s.get("/resources")

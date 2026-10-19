@@ -19,6 +19,7 @@ import json
 import logging
 import secrets
 import time
+from collections import defaultdict, deque
 from urllib.parse import urlparse
 
 import aiohttp
@@ -43,12 +44,13 @@ _PUBLIC_PATHS = {
     "/auth/logout",
     "/favicon.ico",
 }
-_PUBLIC_PREFIXES = ("/static/",)
+_PUBLIC_PREFIXES = ("/static/", "/stream/")
 _CALLBACK_PREFIX = "/dlna/callback/"
 _DOC_PATHS = {"/docs", "/openapi.json", "/redoc"}
 
 _TOKEN_CACHE_TTL = 600
 _token_cache: dict[str, tuple[float, dict | None]] = {}
+_rate_windows: dict[tuple[str, str], deque] = defaultdict(deque)
 _ephemeral_secret = secrets.token_bytes(32)
 
 
@@ -110,9 +112,8 @@ def _allowed_users() -> set[str]:
 def is_user_allowed(user: dict) -> bool:
     allowed = _allowed_users()
     if not allowed:
-        # Prototype convenience: an empty allowlist accepts any Plex account.
-        # Set AUTH_ALLOWED_USERS before exposing this beyond a trusted LAN.
-        return True
+        # Fail closed unless the operator explicitly opts into open signup.
+        return bool(settings.auth_allow_any_user)
     candidates = {
         str(user.get("id", "")).lower(),
         str(user.get("sub", "")).lower(),
@@ -228,6 +229,59 @@ def verify_callback_token(uuid: str, token: str | None) -> bool:
     return hmac.compare_digest(token, callback_token(uuid))
 
 
+def stream_token(uuid: str, resource: str, ttl_seconds: int = 21600) -> str:
+    """Create a signed, expiring proxy token for one Plex media resource."""
+    payload = {
+        "u": uuid,
+        "r": resource,
+        "exp": int(time.time()) + ttl_seconds,
+    }
+    body = _b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    signature = hmac.new(_session_secret(), body.encode("ascii"), hashlib.sha256).digest()
+    return f"{body}.{_b64encode(signature)}"
+
+
+def verify_stream_token(token: str) -> tuple[str, str] | None:
+    """Validate a signed media-proxy token and return (uuid, resource)."""
+    if not token or "." not in token:
+        return None
+    body, encoded_signature = token.rsplit(".", 1)
+    try:
+        signature = _b64decode(encoded_signature)
+        expected = hmac.new(_session_secret(), body.encode("ascii"), hashlib.sha256).digest()
+        if not hmac.compare_digest(signature, expected):
+            return None
+        payload = json.loads(_b64decode(body))
+        if int(payload.get("exp", 0)) <= int(time.time()):
+            return None
+        resource = str(payload.get("r", ""))
+        uuid = str(payload.get("u", ""))
+        if not resource.startswith("/") or not uuid:
+            return None
+        return uuid, resource
+    except Exception:
+        return None
+
+
+def rate_limit(request: Request, bucket: str, limit: int | None = None) -> bool:
+    """Simple per-client sliding-window limiter for login endpoints."""
+    limit = limit or settings.auth_rate_limit_per_minute
+    client = request.client.host if request.client else "unknown"
+    key = (bucket, client)
+    window = _rate_windows[key]
+    now = time.monotonic()
+    while window and now - window[0] > 60:
+        window.popleft()
+    if len(window) >= limit:
+        return False
+    window.append(now)
+    if len(_rate_windows) > 1024:
+        for k in list(_rate_windows):
+            if not _rate_windows[k]:
+                del _rate_windows[k]
+    return True
+
+
 def _same_origin(request: Request) -> bool:
     """Reject browser cross-site state changes when using cookie auth."""
     origin = request.headers.get("origin")
@@ -283,10 +337,10 @@ async def auth_middleware(request: Request, call_next):
 def install_middleware(app) -> None:
     app.middleware("http")(auth_middleware)
     if settings.auth_enabled:
-        if not settings.auth_allowed_users.strip():
+        if not settings.auth_allowed_users.strip() and not settings.auth_allow_any_user:
             logger.warning(
                 "AUTH_ENABLED is on but AUTH_ALLOWED_USERS is empty; "
-                "any Plex account can authenticate"
+                "all Plex logins will be rejected. Set AUTH_ALLOWED_USERS."
             )
         if not settings.auth_session_secret:
             logger.warning(

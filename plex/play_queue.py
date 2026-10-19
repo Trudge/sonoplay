@@ -56,6 +56,8 @@ class PlayQueue(object):
         return self.info
 
     async def refresh_queue(self, playQueueID):
+        if self.info is None:
+            await self.get_info()
         if playQueueID != self.info.playQueueID:
             logger.debug("refresh to a different queue? %s -> %s", self.info.playQueueID, playQueueID)
             self.container_key = str(self.container_key).replace(str(self.info.playQueueID), str(playQueueID), 1)
@@ -221,7 +223,13 @@ class PlayQueue(object):
         return self._build_stream_url(f"{base_path}?{query}")
 
     def _build_stream_url(self, resource: str) -> str:
-        return self.plex_lib.build_url(resource, token=True)
+        from plex import plex_auth
+        device = getattr(self.plex_lib, "device", None)
+        if device is None:
+            return self.plex_lib.build_url(resource, token=True)
+        token = plex_auth.stream_token(device.uuid, resource)
+        host = settings.host_ip or "127.0.0.1"
+        return f"http://{host}:{settings.http_port}/stream/{token}"
 
     def url_for_track(self, track, force_transcode=False):
         """
@@ -320,7 +328,7 @@ class PlayQueue(object):
     async def more(self, after=True):
         if self.info is None:
             await self.get_info()
-        url = URL(self.plex_lib.build_url(self.container_key))
+        url = URL(self.plex_lib.build_url(self._fetch_key()))
         url = url.remove_query_params(["center", "includeBefore", "includeAfter"])
         args = {'includeAfter': 0, 'includeBefore': 0}
         if after:

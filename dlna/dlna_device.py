@@ -34,7 +34,7 @@ from aiohttp import ClientConnectorError, ClientConnectionError
 
 from plex.adapters import remove_adapter
 from utils import xml2dict, UPNP_RC_SERVICE_TYPE, UPNP_AVT_SERVICE_TYPE, g, extract_value
-from dlna.discover import guess_local_ip
+from dlna.discover import guess_local_ip, is_safe_dlna_url
 from settings import settings
 
 PAYLOAD_FMT = '<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" ' \
@@ -170,6 +170,9 @@ class DlnaDeviceService(object):
         self.control_url = urljoin(device.location_url, control_url)
         self.event_url = urljoin(device.location_url, event_url)
         self.spec_url = urljoin(device.location_url, spec_url)
+        for service_url in (self.control_url, self.event_url, self.spec_url):
+            if not is_safe_dlna_url(service_url, base_url=device.location_url):
+                raise ValueError(f"unsafe DLNA service URL: {service_url}")
         self.urn = self.service_type
         self.device = device
         self.subscribed = False
@@ -268,10 +271,12 @@ class DlnaDeviceService(object):
                     data[arg_name] = DEFAULT_ACTION_DATA[arg_name]
         payload = self.payload_from_template(action, data)
 
-        last_exception = None
-        for attempt in range(1, MAX_RETRIES + 1):
+        is_read = action.startswith(("Get", "Browse", "Search"))
+        max_attempts = settings.dlna_read_retries if is_read else 1
+        timeout_seconds = settings.dlna_read_timeout if is_read else settings.dlna_write_timeout
+        for attempt in range(1, max_attempts + 1):
             try:
-                async with client.post(self.control_url, data=payload.encode('utf8'), headers=headers, timeout=settings.http_timeout_dlna) as response:
+                async with client.post(self.control_url, data=payload.encode('utf8'), headers=headers, timeout=timeout_seconds) as response:
                     # Check for 5xx errors - may be a valid SOAP Fault (per UPnP spec)
                     if 500 <= response.status < 600:
                         response_text = await response.text()
@@ -307,16 +312,16 @@ class DlnaDeviceService(object):
                     return info.Envelope.Body.get(f"{action}Response")
             except (ClientConnectionError, asyncio.TimeoutError) as e:
                 last_exception = e
-                if attempt < MAX_RETRIES:
-                    logger.debug("dlna %s %s %s (attempt %d/%d), retrying: %s", 
+                if attempt < max_attempts:
+                    logger.debug("dlna %s %s %s (attempt %d/%d), retrying: %s",
                                 self.device.name, action,
                                 "timeout" if isinstance(e, asyncio.TimeoutError) else "connection error",
-                                attempt, MAX_RETRIES, str(e))
-                    await asyncio.sleep(0.5)  # Brief delay before retry
+                                attempt, max_attempts, str(e))
+                    await asyncio.sleep(0.25)
                     continue
                 # All retries exhausted
                 logger.warning("dlna %s %s connection failed after %d attempts: %s",
-                              self.device.name, action, MAX_RETRIES, str(e))
+                              self.device.name, action, max_attempts, str(e))
                 self.device.repeat_error_count += 1
                 if self.device.repeat_error_count >= ERROR_COUNT_TO_REMOVE:
                     logger.warning("remove device %s due to %d connection errors", self.device.name, self.device.repeat_error_count)
@@ -326,13 +331,13 @@ class DlnaDeviceService(object):
                         asyncio.run_coroutine_threadsafe(self.device.remove_self(), self.device.loop)
                 raise
             except ServerErrorException as e:
-                if attempt < MAX_RETRIES:
+                if attempt < max_attempts:
                     logger.debug("dlna %s %s server error %d (attempt %d/%d), retrying",
-                                self.device.name, action, e.status, attempt, MAX_RETRIES)
-                    await asyncio.sleep(0.5)  # Brief delay before retry
+                                self.device.name, action, e.status, attempt, max_attempts)
+                    await asyncio.sleep(0.25)
                     continue
                 logger.warning("dlna %s %s server error %d after %d attempts",
-                              self.device.name, action, e.status, MAX_RETRIES)
+                              self.device.name, action, e.status, max_attempts)
                 raise
             except Exception as e:
                 # Non-connection errors: don't retry, just raise
@@ -433,6 +438,8 @@ class DlnaDevice(object):
         self.repeat_error_count = 0
 
     async def get_data(self):
+        if not is_safe_dlna_url(self.location_url):
+            raise ValueError(f"unsafe DLNA location: {self.location_url}")
         if self.info is None:
             async with g.http.get(self.location_url) as response:
                 if response.ok:
@@ -644,6 +651,13 @@ class DlnaDevice(object):
         from plex.adapters import adapter_by_device, remove_adapter
         from plex.subscribe import sub_man
         self.stop_subscribe()
+        gdm = getattr(self, "gdm", None)
+        if gdm is not None:
+            try:
+                gdm.stop()
+            except Exception:
+                logger.debug("Error stopping GDM for %s", self.name, exc_info=True)
+            self.gdm = None
         adapter = await adapter_by_device(self)
         adapter.state.state = "STOPPED"
         adapter.state._wakeup_loop()

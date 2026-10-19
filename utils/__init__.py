@@ -86,9 +86,17 @@ def unescape_xml(xml):
     return unescape(xml.decode())
 
 
+MAX_XML_BYTES = 2 * 1024 * 1024
+
+
 def xml2dict(xml):
     if not isinstance(xml, str):
         xml = unescape_xml(xml)
+    if len(xml.encode("utf-8", errors="ignore")) > MAX_XML_BYTES:
+        raise ValueError("XML document exceeds size limit")
+    upper = xml.upper()
+    if "<!DOCTYPE" in upper or "<!ENTITY" in upper:
+        raise ValueError("XML document type/entity declarations are not allowed")
     parsed = xmltodict.parse(xml,
                              process_namespaces=True,
                              namespaces={
@@ -252,9 +260,6 @@ def timeline_poll_headers(device):
     return {
         'X-Plex-Client-Identifier': device.uuid,
         'X-Plex-Protocol': '1.0',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Max-Age': '1209600',
-        'Access-Control-Expose-Headers': 'X-Plex-Client-Identifier',
         'Content-Type': 'text/xml;charset=utf-8'
     }
 
