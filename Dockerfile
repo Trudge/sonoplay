@@ -1,4 +1,4 @@
-FROM python:3.12-slim AS builder
+FROM python:3.13-slim AS builder
 
 WORKDIR /app
 
@@ -19,16 +19,25 @@ COPY src/ src/
 RUN pip install --no-cache-dir .
 
 # --- Final stage: slim runtime image ---
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 WORKDIR /app
+
+# Pull security updates for OS packages present in the base image.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends liblzma5 \
+    && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
 RUN groupadd -r sonoplay && useradd -r -g sonoplay -d /app -s /sbin/nologin sonoplay
 
 # Copy installed packages from builder
-COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
+
+# pip is not needed at runtime but is shipped in the base image; keep the
+# copy patched for the CVEs fixed in 26.2.x.
+RUN python -m pip install --no-cache-dir --upgrade "pip>=26.2.0"
 
 # Copy application code
 COPY templates/ templates/
