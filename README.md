@@ -68,6 +68,28 @@ Common settings:
 
 Note: docker-compose.yaml uses env_file.required and needs Docker Compose v2.17+.
 
+## Authentication (prototype)
+
+Plex-backed authentication can protect the local UI/API. It is off by default.
+
+```bash
+AUTH_ENABLED=true
+AUTH_ALLOWED_USERS=12345678,alice   # Plex user IDs or usernames
+AUTH_SESSION_SECRET=<long random value>
+AUTH_COOKIE_SECURE=true             # when served over HTTPS
+```
+
+The web UI signs in through the Plex PIN flow (`plex.tv/link`). Plex access
+tokens are validated against plex.tv and are never stored in the browser;
+SonoPlay issues a signed HttpOnly session cookie instead. Plex clients may
+authenticate with `X-Plex-Token` or `token` query parameters.
+
+Notes:
+
+- If `AUTH_ALLOWED_USERS` is empty, any Plex account can sign in.
+- Set `AUTH_SESSION_SECRET` explicitly, otherwise sessions are invalidated on restart.
+- The prototype keeps `/health` public and requires no auth when `AUTH_ENABLED` is false.
+
 ## Requirements
 
 - Docker (preferred) or Python 3.11+

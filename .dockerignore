@@ -13,6 +13,7 @@
 # Runtime: application code
 !main.py
 !logging_config.py
+!redaction.py
 !version.py
 !plex/
 !dlna/

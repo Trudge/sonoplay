@@ -120,6 +120,14 @@ class Settings(BaseSettings):
     dlna_subscribe_timeout: int = 120   # DLNA event subscription timeout
     adapter_idle_interval: int = 60     # Seconds between state checks when idle
     pin_cache_max_size: int = 100       # Maximum cached Plex PIN login entries
+    # Plex-backed authentication for the local UI/API (prototype).
+    # Disabled by default so existing deployments keep working unchanged.
+    auth_enabled: bool = False
+    auth_allowed_users: str = ""        # Comma-separated Plex user IDs/usernames
+    auth_session_secret: str | None = None
+    auth_session_ttl_hours: int = 24
+    auth_cookie_secure: bool = False    # Set true when served over HTTPS
+    auth_client_identifier: str = "sonoplay-web"
     # Override the PMS address used in stream URLs sent to DLNA speakers.
     # Needed when Plexamp connects to PMS via WAN/external IP (remote access mode)
     # but hairpin NAT is unavailable — speakers can't reach PMS via WAN IP.

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SonoPlay - Sign in</title>
+    <link rel="stylesheet" href="/static/vendor/fontawesome.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', path='/css/minimal-clean.css') }}">
+</head>
+<body>
+    <main class="app" style="min-height: 100vh; display: flex; align-items: center; justify-content: center;">
+        <section style="max-width: 460px; width: 90%; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 12px; padding: 2rem;">
+            <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.25rem;">
+                <div class="nav-brand-icon"><i class="fas fa-play"></i></div>
+                <h1 style="margin: 0; font-size: 1.35rem;">Sign in to SonoPlay</h1>
+            </div>
+
+            {% if error %}
+            <p style="color: var(--danger, #c0392b);" role="alert">{{ error }}</p>
+            <p><a href="/auth/login">Try again</a></p>
+            {% else %}
+            <p style="color: var(--text-secondary); line-height: 1.6;">
+                Open <a href="https://plex.tv/link" target="_blank" rel="noopener noreferrer">plex.tv/link</a>
+                and enter this code:
+            </p>
+            <p style="font-family: var(--font-mono, monospace); font-size: 2rem; font-weight: 600; letter-spacing: 0.15em; text-align: center; margin: 1.5rem 0;">
+                {{ pin }}
+            </p>
+            <p id="authStatus" style="color: var(--text-secondary); text-align: center;">Waiting for Plex approval…</p>
+            <script>
+                const pinId = {{ pin_id|tojson }};
+                const statusEl = document.getElementById('authStatus');
+
+                async function poll() {
+                    try {
+                        const response = await fetch('/auth/check?pin_id=' + encodeURIComponent(pinId), { cache: 'no-store' });
+                        const data = await response.json();
+                        if (data.status === 'ok') {
+                            window.location.replace('/');
+                            return;
+                        }
+                        if (data.status === 'forbidden') {
+                            statusEl.textContent = 'This Plex account is not allowed to access SonoPlay.';
+                            return;
+                        }
+                        if (data.status === 'invalid') {
+                            statusEl.textContent = 'Plex rejected the login. Refresh to try again.';
+                            return;
+                        }
+                    } catch (err) {
+                        // Keep polling; a transient network error should not end the flow.
+                    }
+                    setTimeout(poll, 2000);
+                }
+
+                poll();
+            </script>
+            {% endif %}
+        </section>
+    </main>
+</body>
+</html>

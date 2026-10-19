@@ -42,7 +42,7 @@ RUN python -m pip install --no-cache-dir --upgrade "pip>=26.2.0"
 # Copy application code
 COPY templates/ templates/
 COPY static/ static/
-COPY main.py logging_config.py version.py ./
+COPY main.py logging_config.py redaction.py version.py ./
 COPY plex/ plex/
 COPY dlna/ dlna/
 COPY settings/ settings/

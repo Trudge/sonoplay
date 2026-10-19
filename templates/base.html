@@ -50,6 +50,14 @@
                 
                 <!-- Right side: Settings + Plex Status -->
                 <div class="nav-right" style="display: flex; align-items: center; gap: 1rem;">
+                    {% if auth_enabled %}
+                    <form method="post" action="/auth/logout" style="display: inline;">
+                        <button type="submit" title="Sign out" aria-label="Sign out" style="background: none; border: none; cursor: pointer; padding: 0.5rem; color: var(--text-secondary); font-size: 1.1rem;">
+                            <i class="fas fa-sign-out-alt"></i>
+                        </button>
+                    </form>
+                    {% endif %}
+
                     <!-- Settings Button -->
                     <button class="nav-settings-btn" onclick="openSettingsModal()" title="Audio Settings" style="background: none; border: none; cursor: pointer; padding: 0.5rem; color: var(--text-secondary); font-size: 1.1rem; transition: color 0.2s;">
                         <i class="fas fa-cog"></i>

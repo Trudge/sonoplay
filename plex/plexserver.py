@@ -20,7 +20,7 @@
 # (at your option) any later version.
 
 from fastapi import FastAPI, Request, Header, Query, HTTPException, Form
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from html import escape as xml_escape
 from pydantic import BaseModel, Field
 import uvicorn
@@ -54,6 +54,8 @@ from plex.gdm import PlexGDM
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from plex import pin_login
+from plex import plex_auth
+from redaction import redact_secrets
 from datetime import datetime, timedelta, timezone
 from version import VERSION
 import aiohttp
@@ -100,9 +102,14 @@ class AudioSettingsUpdate(BaseModel):
     sample_rate_hz: Optional[int] = Field(default=None, ge=0, le=384000)
 
 
-plex_server = FastAPI()
+plex_server = FastAPI(
+    docs_url=None if settings.auth_enabled else "/docs",
+    redoc_url=None if settings.auth_enabled else "/redoc",
+    openapi_url=None if settings.auth_enabled else "/openapi.json",
+)
 s = plex_server
 plex_server.mount("/static", StaticFiles(directory="static"), name="static")
+plex_auth.install_middleware(plex_server)
 
 
 # Global handler: when a DLNA device becomes unreachable mid-request,
@@ -275,6 +282,83 @@ async def health():
     }
 
 
+@s.get("/auth/login")
+async def auth_login(request: Request):
+    """Start the Plex PIN login flow for the local UI."""
+    if not settings.auth_enabled:
+        return RedirectResponse("/", status_code=303)
+
+    session = plex_auth.verify_session(request.cookies.get(plex_auth.SESSION_COOKIE))
+    if session is not None and plex_auth.is_user_allowed(session):
+        return RedirectResponse("/", status_code=303)
+
+    try:
+        pin, pin_id = await plex_auth.create_pin()
+    except Exception as exc:
+        logger.warning("Unable to create Plex login PIN: %s", exc.__class__.__name__)
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"error": "Unable to contact plex.tv. Check the server logs and try again."},
+            status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    return templates.TemplateResponse(
+        request,
+        "login.html",
+        {"pin": pin, "pin_id": pin_id},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@s.get("/auth/check")
+async def auth_check(pin_id: str):
+    """Poll a Plex PIN and create a session once the user approves it."""
+    if not settings.auth_enabled:
+        return JSONResponse({"status": "disabled"}, status_code=404)
+    if not pin_id.isdigit() or len(pin_id) > 32:
+        return JSONResponse({"status": "invalid"}, status_code=400)
+
+    try:
+        token = await plex_auth.check_pin(pin_id)
+    except Exception as exc:
+        logger.warning("Unable to check Plex login PIN: %s", exc.__class__.__name__)
+        return JSONResponse({"status": "error"}, status_code=502)
+
+    if not token:
+        return JSONResponse({"status": "pending"}, headers={"Cache-Control": "no-store"})
+
+    user = await plex_auth.validate_plex_token(token)
+    if user is None:
+        return JSONResponse({"status": "invalid"}, status_code=401)
+    if not plex_auth.is_user_allowed(user):
+        logger.warning("Rejected Plex login for disallowed user %s", user.get("id"))
+        return JSONResponse({"status": "forbidden"}, status_code=403)
+
+    response = JSONResponse(
+        {"status": "ok", "user": user.get("username") or user.get("title") or user.get("id")},
+        headers={"Cache-Control": "no-store"},
+    )
+    response.set_cookie(
+        plex_auth.SESSION_COOKIE,
+        plex_auth.issue_session(user),
+        max_age=int(settings.auth_session_ttl_hours * 3600),
+        httponly=True,
+        secure=settings.auth_cookie_secure,
+        samesite="strict",
+        path="/",
+    )
+    return response
+
+
+@s.post("/auth/logout")
+async def auth_logout():
+    response = RedirectResponse("/auth/login", status_code=303)
+    response.delete_cookie(plex_auth.SESSION_COOKIE, path="/")
+    return response
+
+
 @s.get("/api/plex-status")
 async def plex_status():
     """Check if any device is connected to Plex."""
@@ -328,6 +412,7 @@ async def link_page(request: Request):
         "discovered_devices.html",
         {
             'onboarding_enabled': settings.enable_onboarding_wizard,
+            'auth_enabled': settings.auth_enabled,
             'active_page': 'devices'
         }
     )
@@ -365,6 +450,7 @@ async def virtual_devices_page(request: Request):
         "virtual_devices.html",
         {
             "onboarding_enabled": settings.enable_onboarding_wizard,
+            "auth_enabled": settings.auth_enabled,
             "active_page": "groups"
         }
     )
@@ -693,6 +779,10 @@ async def link_device(request: Request,
 @s.api_route("/dlna/callback/{uuid}", methods=["NOTIFY"])
 async def dlna_subscribe(request: Request, uuid: str):
     require_valid_uuid(uuid)
+    if settings.auth_enabled and not plex_auth.verify_callback_token(
+        uuid, request.query_params.get("token")
+    ):
+        raise HTTPException(403, "Invalid callback token")
     adapter = await adapter_by_device(await get_device_by_uuid(uuid))
     b = await request.body()
     info = xml2dict(b)
@@ -919,7 +1009,7 @@ async def timeline_poll(request: Request,
             msg = await sub_man.msg_for_device(device)
         msg = msg.format(command_id=commandID)
         if datetime.now(timezone.utc) - begin_time >= timedelta(milliseconds=500):
-            logger.debug(f"Slow poll request: {request.url} took {datetime.now(timezone.utc) - begin_time}")
+            logger.debug(f"Slow poll request: {redact_secrets(request.url)} took {datetime.now(timezone.utc) - begin_time}")
         asyncio.create_task(sub_man.notify_server_device(device, force=True))
         return await build_response(msg, device=device, headers=timeline_poll_headers(device))
     finally:
@@ -966,10 +1056,11 @@ async def resources(request: Request, target_uuid: str = Header(None, alias="x-p
     res = "<MediaContainer>"
     res += f'<Player title="{xml_escape(str(device.name), quote=True)}" protocol="plex" protocolVersion="1" ' \
            f'protocolCapabilities="timeline,playback,playqueues" ' \
-           f'machineIdentifier="{device.uuid}" product="{device.model}" ' \
-           f'platform="{settings.platform}" ' \
-           f'platformVersion="{settings.platform_version}" ' \
-           f'version="{settings.version}" deviceClass="stb"/>'
+           f'machineIdentifier="{xml_escape(str(device.uuid), quote=True)}" ' \
+           f'product="{xml_escape(str(device.model), quote=True)}" ' \
+           f'platform="{xml_escape(str(settings.platform), quote=True)}" ' \
+           f'platformVersion="{xml_escape(str(settings.platform_version), quote=True)}" ' \
+           f'version="{xml_escape(str(settings.version), quote=True)}" deviceClass="stb"/>'
     res += "</MediaContainer>"
     return await build_response(res, device=device)
 

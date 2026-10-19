@@ -173,7 +173,7 @@ class SubscribeManager(object):
                     res.raise_for_status()
                 except Exception as e:
                     body = await res.text()
-                    logger.error("notify server error: %s, %s, %s", e, body, params)
+                    logger.error("notify server error: %s, %s", e, body[:500])
         except asyncio.TimeoutError:
             logger.debug("notify server timeout for %s", device.name)
         except Exception as e:

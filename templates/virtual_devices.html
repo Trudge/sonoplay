@@ -684,7 +684,7 @@
                             <div class="device-list-model">${escapeHtml(device.model || 'DLNA Device')}</div>
                         </div>
                         <div class="device-list-actions">
-                            <button class="icon-btn" onclick="addMember('${device.uuid}')" ${isSelected ? 'disabled' : ''} aria-label="Add ${escapeHtml(device.name)}">
+                            <button class="icon-btn" onclick="addMember(${escapeHtml(JSON.stringify(device.uuid))})" ${isSelected ? 'disabled' : ''} aria-label="Add ${escapeHtml(device.name)}">
                                 <i class="fas fa-plus"></i>
                             </button>
                         </div>
@@ -718,13 +718,13 @@
                             ${warning}
                         </div>
                         <div class="device-list-actions">
-                            <button class="icon-btn" onclick="moveMember('${uuid}', -1)" ${index === 0 ? 'disabled' : ''} aria-label="Move up">
+                            <button class="icon-btn" onclick="moveMember(${escapeHtml(JSON.stringify(uuid))}, -1)" ${index === 0 ? 'disabled' : ''} aria-label="Move up">
                                 <i class="fas fa-arrow-up"></i>
                             </button>
-                            <button class="icon-btn" onclick="moveMember('${uuid}', 1)" ${index === selectedMembers.length - 1 ? 'disabled' : ''} aria-label="Move down">
+                            <button class="icon-btn" onclick="moveMember(${escapeHtml(JSON.stringify(uuid))}, 1)" ${index === selectedMembers.length - 1 ? 'disabled' : ''} aria-label="Move down">
                                 <i class="fas fa-arrow-down"></i>
                             </button>
-                            <button class="icon-btn danger" onclick="removeMember('${uuid}')" aria-label="Remove">
+                            <button class="icon-btn danger" onclick="removeMember(${escapeHtml(JSON.stringify(uuid))})" aria-label="Remove">
                                 <i class="fas fa-times"></i>
                             </button>
                         </div>

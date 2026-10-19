@@ -80,7 +80,8 @@ class PlexGDM(object):
         }
         client_data = ""
         for key, value in data.items():
-            client_data += "%s: %s\n" % (key, value)
+            safe_value = str(value).replace("\r", " ").replace("\n", " ")
+            client_data += "%s: %s\n" % (key, safe_value)
         return client_data
 
     def init_socket(self):

@@ -355,12 +355,15 @@ class DlnaDeviceService(object):
         if self.next_subscribe_call_time is not None:
             if datetime.now(timezone.utc) < self.next_subscribe_call_time:
                 return
+        callback_url = 'http://' + settings.host_ip + ':' + str(settings.http_port) + '/dlna/callback/' + self.device.uuid
+        if settings.auth_enabled:
+            from plex import plex_auth
+            callback_url += '?token=' + plex_auth.callback_token(self.device.uuid)
         headers = {
             'Cache-Control': 'no-cache',
             'User-Agent': 'SonoPlay/1.0',
             'NT': 'upnp:event',
-            'Callback': '<http://' + settings.host_ip + ':' + str(settings.http_port) + '/dlna/callback/'
-                        + self.device.uuid + '>',
+            'Callback': '<' + callback_url + '>',
             'Timeout': f'Second-{timeout_sec}'
         }
         logger.info("sub dlna device %s %s", self.device.name, self.service_type)

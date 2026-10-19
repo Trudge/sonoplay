@@ -38,6 +38,7 @@ from starlette.datastructures import QueryParams
 
 from plex.play_queue import PlayQueue
 from utils import parse_timedelta, convert_volume, g, pms_header, extract_value
+from redaction import redact_secrets
 from settings import settings
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -983,7 +984,7 @@ class PlexDlnaAdapter(object):
                 while True:
                     attempt += 1
                     if attempt > 1:
-                        logger.debug("%s retrying transport load attempt %d for %s", self.dlna.name, attempt, url)
+                        logger.debug("%s retrying transport load attempt %d for %s", self.dlna.name, attempt, redact_secrets(url))
                         self._reset_active_operation_tracking()
                     await self._issue_transport_commands(url, metadata, offset=offset if attempt == 1 else 0, paused=paused)
                     settled = await self._await_transport_settle(operation_id)
@@ -992,7 +993,7 @@ class PlexDlnaAdapter(object):
                         break
                     if settled or attempt >= self._transport_max_attempts:
                         if not settled:
-                            logger.warning("%s transport load timed out after %d attempts for %s", self.dlna.name, attempt, url)
+                            logger.warning("%s transport load timed out after %d attempts for %s", self.dlna.name, attempt, redact_secrets(url))
                         break
             finally:
                 self._finish_transport_operation(operation_id)
@@ -1017,7 +1018,7 @@ class PlexDlnaAdapter(object):
             self.state.update(uri=None)
         else:
             self.state.update(uri=url)
-        logger.debug("%s SetAVTransportURI: %s", self.dlna.name, url)
+        logger.debug("%s SetAVTransportURI: %s", self.dlna.name, redact_secrets(url))
         await self.dlna.SetAVTransportURI({"CurrentURI": url, "CurrentURIMetaData": metadata})
         if offset != 0:
             self.state.update(position=str(timedelta(milliseconds=offset)))
@@ -1209,9 +1210,11 @@ class PlexDlnaAdapter(object):
             self.plex_bind_token = settings.get_token_for_uuid(self.dlna.uuid)
             if not self.plex_bind_token:
                 return
-        await g.http.put(f"https://plex.tv/devices/{self.dlna.uuid}?X-Plex-Token={self.plex_bind_token}",
+        headers = pms_header(self.dlna)
+        headers["X-Plex-Token"] = self.plex_bind_token
+        await g.http.put(f"https://plex.tv/devices/{self.dlna.uuid}",
                          data={"Connection[][uri]": f"http://{settings.host_ip}:{settings.http_port}"},
-                         headers=pms_header(self.dlna))
+                         headers=headers)
 
     def update_state(self, info):
         if info.propertyset:

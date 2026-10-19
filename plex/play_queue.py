@@ -7,6 +7,7 @@ import math
 logger = logging.getLogger(__name__)
 
 from utils import g, build_didl_lite_metadata, mime_type_for_container, DEFAULT_AUDIO_MIME_TYPE
+from redaction import redact_secrets
 from settings import settings
 
 UNLIMITED = math.inf
@@ -44,7 +45,7 @@ class PlayQueue(object):
     async def get_info(self):
         if self.info is None:
             url = self.plex_lib.build_url(self._fetch_key())
-            logger.debug("get queue %s", url)
+            logger.debug("get queue %s", redact_secrets(url))
             async with g.http.get(url, headers=self.plex_lib.request_headers(accept_json=True)) as res:
                 res.raise_for_status()
                 self.info = DotMap((await res.json())['MediaContainer'])
@@ -61,7 +62,7 @@ class PlayQueue(object):
         old_selected_item_id = await self.selected_item_id()
         old_selected_item_offset = await self.selected_offset()
         url = self.plex_lib.build_url(self._fetch_key())
-        logger.debug("refresh queue from %s", url)
+        logger.debug("refresh queue from %s", redact_secrets(url))
         async with g.http.get(url, headers=self.plex_lib.request_headers(accept_json=True)) as res:
             res.raise_for_status()
             info = DotMap((await res.json())['MediaContainer'])
