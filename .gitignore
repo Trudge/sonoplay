@@ -59,6 +59,7 @@ temp/
 # ── GitHub (track workflows and instructions only) ──
 .github/*
 !.github/workflows/
+!.github/dependabot.yml
 
 # ── Git worktrees ──
 .worktrees/

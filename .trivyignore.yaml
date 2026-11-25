@@ -1,0 +1,15 @@
+# Trivy ignore file. The CI workflow passes this path explicitly
+# (trivy-action's `trivyignores` input); Trivy does not auto-discover the YAML
+# variant for `trivy fs`.
+#
+# Add accepted findings here with a reason and an expiry date, e.g.:
+#
+#   misconfigurations:
+#     - id: DS-0002
+#       paths:
+#         - Dockerfile
+#       statement: Why this is accepted.
+#       expired_at: 2027-06-30
+#
+# Prefer fixing the finding; an expiry forces a re-review.
+misconfigurations: []

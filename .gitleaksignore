@@ -1,0 +1,32 @@
+# Upstream history, not our commits.
+#
+# Commit 9f8f1ab ("website update") is by the upstream author
+# (aquantumofdonuts) and added docs/ISSUES.md containing Plex URLs with
+# X-Plex-Token query parameters. The file was later removed from tracking, but
+# the commit is still reachable in this fork's history.
+#
+# We do not rewrite upstream history: the same commit is public in the upstream
+# repo, so removing it here would neither unpublish it nor make the token
+# invalid. These fingerprints suppress only those historical findings; anything
+# introduced in a new commit is still reported.
+9f8f1abdeca271c8ce7f82a76cbbcff70e4814bc:docs/ISSUES.md:generic-api-key:221
+9f8f1abdeca271c8ce7f82a76cbbcff70e4814bc:docs/ISSUES.md:generic-api-key:223
+9f8f1abdeca271c8ce7f82a76cbbcff70e4814bc:docs/ISSUES.md:generic-api-key:240
+9f8f1abdeca271c8ce7f82a76cbbcff70e4814bc:docs/ISSUES.md:generic-api-key:244
+9f8f1abdeca271c8ce7f82a76cbbcff70e4814bc:docs/ISSUES.md:generic-api-key:247
+9f8f1abdeca271c8ce7f82a76cbbcff70e4814bc:docs/ISSUES.md:generic-api-key:248
+9f8f1abdeca271c8ce7f82a76cbbcff70e4814bc:docs/ISSUES.md:generic-api-key:250
+9f8f1abdeca271c8ce7f82a76cbbcff70e4814bc:docs/ISSUES.md:generic-api-key:251
+9f8f1abdeca271c8ce7f82a76cbbcff70e4814bc:docs/ISSUES.md:generic-api-key:252
+9f8f1abdeca271c8ce7f82a76cbbcff70e4814bc:docs/ISSUES.md:generic-api-key:260
+9f8f1abdeca271c8ce7f82a76cbbcff70e4814bc:docs/ISSUES.md:generic-api-key:261
+9f8f1abdeca271c8ce7f82a76cbbcff70e4814bc:docs/ISSUES.md:generic-api-key:271
+9f8f1abdeca271c8ce7f82a76cbbcff70e4814bc:docs/ISSUES.md:generic-api-key:273
+9f8f1abdeca271c8ce7f82a76cbbcff70e4814bc:docs/ISSUES.md:generic-api-key:277
+9f8f1abdeca271c8ce7f82a76cbbcff70e4814bc:docs/ISSUES.md:generic-api-key:291
+9f8f1abdeca271c8ce7f82a76cbbcff70e4814bc:docs/ISSUES.md:generic-api-key:293
+9f8f1abdeca271c8ce7f82a76cbbcff70e4814bc:docs/ISSUES.md:generic-api-key:297
+9f8f1abdeca271c8ce7f82a76cbbcff70e4814bc:docs/ISSUES.md:generic-api-key:376
+9f8f1abdeca271c8ce7f82a76cbbcff70e4814bc:docs/ISSUES.md:generic-api-key:384
+9f8f1abdeca271c8ce7f82a76cbbcff70e4814bc:docs/ISSUES.md:generic-api-key:424
+9f8f1abdeca271c8ce7f82a76cbbcff70e4814bc:docs/ISSUES.md:generic-api-key:426

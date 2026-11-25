@@ -1,0 +1,79 @@
+name: security
+
+# Runs on every PR/push plus weekly, so newly disclosed CVEs show up even when
+# nothing in the repo changed. Keep this file identical across all repos; the
+# repo-specific checks live in scripts/security-audit.sh.
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependencies:
+    name: dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      - name: pip-audit
+        run: bash scripts/security-audit.sh
+      - name: npm audit
+        if: ${{ hashFiles('package-lock.json') != '' }}
+        run: npm audit --audit-level=high
+
+  sast:
+    name: sast
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      - name: bandit (HIGH severity only)
+        if: ${{ hashFiles('**/*.py') != '' }}
+        run: uvx --from bandit bandit -r . -x ./.venv,./node_modules,./build,./dist -lll -q
+
+  secrets:
+    name: secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # gitleaks-action needs GITLEAKS_LICENSE for organisations; personal
+          # accounts are free. Uncomment and add the secret if that changes.
+          # GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  filesystem:
+    name: filesystem
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: trivy fs (deps, secrets, misconfig)
+        uses: aquasecurity/trivy-action@0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: .trivyignore.yaml
+      - name: hadolint
+        if: ${{ hashFiles('Dockerfile') != '' }}
+        uses: hadolint/hadolint-action@v3.5.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: error
