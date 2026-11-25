@@ -25,7 +25,7 @@ if [[ -f uv.lock ]]; then
 fi
 
 while IFS= read -r -d '' req; do
-	if grep -qE '^(-e |\.\./|-r )' "$req"; then
+	if grep -qE '^(-e |.*\.\./)' "$req"; then
 		echo "security-audit: skipping $req (local path/editable reference)"
 		continue
 	fi
