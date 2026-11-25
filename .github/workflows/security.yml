@@ -7,7 +7,8 @@ name: security
 on:
   pull_request:
   push:
-    branches: [main, master]
+    # dev is this fork's default branch.
+    branches: [main, master, dev]
   schedule:
     - cron: "17 3 * * 1"
   workflow_dispatch:
